@@ -54,11 +54,12 @@ class IdentifierType(db.Model):
 NAAN = "83794"
 
 def mint_ark():
+    """Generate an ARK identifier."""
     suffix = str(uuid.uuid4())
     return f"ark:/{NAAN}/{suffix}"
 
 # ------------------------------------------------------------
-# HELPERS
+# HELPER FUNCTIONS
 # ------------------------------------------------------------
 def construct_url(url_format, id):
     if url_format and id:
@@ -66,13 +67,13 @@ def construct_url(url_format, id):
     return None
 
 def init_identifier_types():
+    """Create identifier types if missing."""
     defaults = [
         ("ark", "Archival Resource Key", "https://n2t.net/ark:/83794/<id>"),
         ("luna", "LUNA Image ID", "https://images.is.ed.ac.uk/luna/servlet/detail/<id>"),
         ("arch", "Archipelago UUID", "https://digital.collections.ed.ac.uk/do/<id>"),
         ("file", "Source Filename", None),
-        ("cantaloupe", "IIIF Cantaloupe ID",
-         "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/<id>/full/600,/0/default.jpg")
+        ("cantaloupe", "IIIF Cantaloupe ID", "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/<id>/full/600,/0/default.jpg")
     ]
     for shortcode, desc, url in defaults:
         if not IdentifierType.query.filter_by(shortcode=shortcode).first():
@@ -93,9 +94,31 @@ def not_found(error):
 def index():
     return 'Welcome to ERIC!'
 
+'''
+@app.route('/object/<uuid:uuid>')
+def view_object(uuid):
+    obj = Object.query.options(joinedload(Object.identifiers)).filter(Object.uuid == uuid).first_or_404()
+    obj_dict = {
+        "id": obj.id,
+        "uuid": str(obj.uuid),
+        "type": obj.type.name,
+        "primary_url": construct_url(obj.type.url_construct, obj.primary_id),
+        "identifiers": [
+            {
+                "type": identifier.type.description,
+                "shortcode": identifier.type.shortcode,
+                "identifier": identifier.id,
+                "url": construct_url(identifier.type.url_construct, identifier.id)
+            } for identifier in obj.identifiers
+        ]
+    }
+    return jsonify(obj_dict)
+'''
+
 @app.route('/object/<uuid:user_uuid>')
 def view_object(user_uuid):
-    uuid_hex = user_uuid.hex
+    # Convert UUID object → stripped hex string
+    uuid_hex = user_uuid.hex  # this gives 32-char no-hyphen form
 
     obj = (
         Object.query
@@ -130,15 +153,17 @@ def view_identifier(identifier):
         "url": construct_url(obj.type.url_construct, obj.id),
     })
 
-# ------------------------------------------------------------
-# LOOKUP (your existing resolver)
-# ------------------------------------------------------------
+
+
+'''
 @app.route("/lookup/<path:identifier_value>")
 def lookup(identifier_value):
+    # Find the identifier
     ident = Identifier.query.filter_by(id=identifier_value).first()
     if not ident:
         return jsonify({"error": "Identifier not found"}), 404
 
+    # Load the object and all its identifiers
     obj = (
         Object.query
         .options(joinedload(Object.identifiers).joinedload(Identifier.type))
@@ -148,23 +173,15 @@ def lookup(identifier_value):
     if not obj:
         return jsonify({"error": "Object not found"}), 404
 
+    # Build dictionary of all identifiers with URLs from db
     all_ids = {}
     html_rows = []
     for i in obj.identifiers:
         url = construct_url(i.type.url_construct, i.id) or i.id
         all_ids[i.type.shortcode] = url
-        html_rows.append(
-            f"<tr><td>{escape(i.type.shortcode)}</td>"
-            f"<td><a href='{escape(url)}'>{escape(i.id)}</a></td></tr>"
-        )
+        html_rows.append(f"<tr><td>{escape(i.type.shortcode)}</td><td><a href='{escape(url)}'>{escape(i.id)}</a></td></tr>")
 
-    # Default redirect → ARCH record
-    if request.args.get("format") is None:
-        arch_ident = next((i for i in obj.identifiers if i.type.shortcode == "arch"), None)
-        if arch_ident:
-            arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
-            return redirect(arch_url, code=302)
-
+    # HTML output if requested
     if request.args.get("format") == "html":
         html = f"""
         <html>
@@ -190,6 +207,7 @@ def lookup(identifier_value):
         """
         return html
 
+    # JSON output (default)
     return jsonify({
         "uuid": str(obj.uuid),
         "primary_id": obj.primary_id,
@@ -197,15 +215,15 @@ def lookup(identifier_value):
         "identifiers": all_ids
     })
 
-# ------------------------------------------------------------
-# NEW: LUNA DETAIL → ARCH
-# ------------------------------------------------------------
-@app.route("/luna/servlet/detail/<identifier>")
-def luna_detail(identifier):
-    ident = Identifier.query.filter_by(id=identifier).first()
+'''
+@app.route("/lookup/<path:identifier_value>")
+def lookup(identifier_value):
+    # Find the identifier
+    ident = Identifier.query.filter_by(id=identifier_value).first()
     if not ident:
-        abort(404)
+        return jsonify({"error": "Identifier not found"}), 404
 
+    # Load the object and all its identifiers
     obj = (
         Object.query
         .options(joinedload(Object.identifiers).joinedload(Identifier.type))
@@ -213,56 +231,60 @@ def luna_detail(identifier):
         .first()
     )
     if not obj:
-        abort(404)
+        return jsonify({"error": "Object not found"}), 404
 
-    arch_ident = next((i for i in obj.identifiers if i.type.shortcode == "arch"), None)
-    if not arch_ident:
-        abort(404)
+    # Build identifier list
+    all_ids = {}
+    html_rows = []
+    for i in obj.identifiers:
+        url = construct_url(i.type.url_construct, i.id) or i.id
+        all_ids[i.type.shortcode] = url
+        html_rows.append(f"<tr><td>{escape(i.type.shortcode)}</td>"
+                         f"<td><a href='{escape(url)}'>{escape(i.id)}</a></td></tr>")
 
-    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
-    return redirect(arch_url, code=302)
+    # ------ NEW: default behavior = redirect to arch URL ------
+    if request.args.get("format") is None:
+        arch_ident = next((i for i in obj.identifiers if i.type.shortcode == "arch"), None)
+        if arch_ident:
+            arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
+            return redirect(arch_url, code=302)
+    # -----------------------------------------------------------
 
-# ------------------------------------------------------------
-# NEW: LUNA IIIF → CANTALOUPE
-# ------------------------------------------------------------
-@app.route("/luna/servlet/iiif/<identifier>/<path:iiif_params>")
-def luna_iiif(identifier, iiif_params):
-    ident = Identifier.query.filter_by(id=identifier).first()
-    if not ident:
-        abort(404)
+    # HTML output
+    if request.args.get("format") == "html":
+        html = f"""
+        <html>
+        <head>
+            <title>Lookup: {escape(identifier_value)}</title>
+            <style>
+                body {{ font-family: sans-serif; margin: 40px; }}
+                table {{ border-collapse: collapse; width: 80%; }}
+                td, th {{ border: 1px solid #ddd; padding: 8px; }}
+                th {{ background-color: #f4f4f4; }}
+            </style>
+        </head>
+        <body>
+            <h2>Object Lookup</h2>
+            <p><strong>Internal UUID:</strong> {escape(obj.uuid)}</p>
+            <p><strong>Primary ID:</strong> {escape(obj.primary_id)}</p>
+            <table>
+                <tr><th>Identifier Type</th><th>Value</th></tr>
+                {''.join(html_rows)}
+            </table>
+        </body>
+        </html>
+        """
+        return html
 
-    obj = (
-        Object.query
-        .options(joinedload(Object.identifiers).joinedload(Identifier.type))
-        .filter_by(id=ident.object_id)
-        .first()
-    )
-    if not obj:
-        abort(404)
+    # JSON output fallback
+    return jsonify({
+        "uuid": str(obj.uuid),
+        "primary_id": obj.primary_id,
+        "object_type": obj.type.name if obj.type else None,
+        "identifiers": all_ids
+    })
 
-    cant_ident = next((i for i in obj.identifiers if i.type.shortcode == "cantaloupe"), None)
-    if not cant_ident:
-        abort(404)
 
-    # Base URL from DB is ".../<id>/full/600,/0/default.jpg"
-    cant_url = construct_url(cant_ident.type.url_construct, cant_ident.id)
-
-    # Trim everything after the identifier
-    cant_url = cant_url.rsplit("/", 4)[0]
-
-    final_url = f"{cant_url}/{iiif_params}"
-    return redirect(final_url, code=302)
-
-# ------------------------------------------------------------
-# NEW: Test images.is.ed.ac.uk paths without DNS changes
-# ------------------------------------------------------------
-@app.route("/images.is.ed.ac.uk/<path:subpath>")
-def simulate_images_host(subpath):
-    return redirect(f"/{subpath}", code=302)
-
-# ------------------------------------------------------------
-# MAIN
-# ------------------------------------------------------------
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()

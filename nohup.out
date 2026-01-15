@@ -1,0 +1,89 @@
+Usage: flask run [OPTIONS]
+Try 'flask run --help' for help.
+
+Error: While importing 'eric.app', an ImportError was raised:
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.9/site-packages/flask/cli.py", line 245, in locate_app
+    __import__(module_name)
+  File "/apps/www/eric/app.py", line 2, in <module>
+    from flask_sqlalchemy import SQLAlchemy
+ModuleNotFoundError: No module named 'flask_sqlalchemy'
+
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://10.70.8.170:5000
+[33mPress CTRL+C to quit[0m
+10.65.193.4 - - [13/Nov/2025 15:58:16] "GET / HTTP/1.1" 200 -
+10.65.193.4 - - [13/Nov/2025 15:58:16] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://10.70.8.170:5000
+[33mPress CTRL+C to quit[0m
+ * Debug mode: off
+Address already in use
+Port 5000 is in use by another program. Either identify and stop that program, or start the server with a different port.
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://10.70.8.170:5000
+[33mPress CTRL+C to quit[0m
+[2025-11-14 10:43:19,165] ERROR in app: Exception on /object/27548824-791f-4fda-806d-5f88a1f7c834 [GET]
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 919, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+  File "/apps/www/eric/app.py", line 96, in view_object
+    obj = Object.query.options(joinedload('identifiers')).filter(Object.uuid == uuid).first_or_404()
+  File "/usr/local/lib64/python3.9/site-packages/sqlalchemy/orm/strategy_options.py", line 2435, in joinedload
+    return _generate_from_keys(Load.joinedload, keys, False, kw)
+  File "/usr/local/lib64/python3.9/site-packages/sqlalchemy/orm/strategy_options.py", line 2319, in _generate_from_keys
+    raise sa_exc.ArgumentError(
+sqlalchemy.exc.ArgumentError: Strings are not accepted for attribute names in loader options; please use class-bound attributes directly.
+127.0.0.1 - - [14/Nov/2025 10:43:19] "[35m[1mGET /object/27548824-791f-4fda-806d-5f88a1f7c834 HTTP/1.1[0m" 500 -
+[2025-11-14 10:48:05,423] ERROR in app: Exception on /object/27548824-791f-4fda-806d-5f88a1f7c834 [GET]
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 919, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+  File "/apps/www/eric/app.py", line 96, in view_object
+    obj = Object.query.options(joinedload('Object.identifiers')).filter(Object.uuid == uuid).first_or_404()
+  File "/usr/local/lib64/python3.9/site-packages/sqlalchemy/orm/strategy_options.py", line 2435, in joinedload
+    return _generate_from_keys(Load.joinedload, keys, False, kw)
+  File "/usr/local/lib64/python3.9/site-packages/sqlalchemy/orm/strategy_options.py", line 2319, in _generate_from_keys
+    raise sa_exc.ArgumentError(
+sqlalchemy.exc.ArgumentError: Strings are not accepted for attribute names in loader options; please use class-bound attributes directly.
+127.0.0.1 - - [14/Nov/2025 10:48:05] "[35m[1mGET /object/27548824-791f-4fda-806d-5f88a1f7c834 HTTP/1.1[0m" 500 -
+[2025-11-14 10:52:54,667] ERROR in app: Exception on /object/27548824-791f-4fda-806d-5f88a1f7c834 [GET]
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 919, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+  File "/usr/local/lib/python3.9/site-packages/flask/app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+  File "/apps/www/eric/app.py", line 96, in view_object
+    obj = Object.query.options(joinedload(Object.identifiers)).filter(Object.uuid == uuid).first_or_404()
+  File "/usr/local/lib64/python3.9/site-packages/sqlalchemy/orm/strategy_options.py", line 2435, in joinedload
+    return _generate_from_keys(Load.joinedload, keys, False, kw)
+  File "/usr/local/lib64/python3.9/site-packages/sqlalchemy/orm/strategy_options.py", line 2319, in _generate_from_keys
+    raise sa_exc.ArgumentError(
+sqlalchemy.exc.ArgumentError: Strings are not accepted for attribute names in loader options; please use class-bound attributes directly.
+127.0.0.1 - - [14/Nov/2025 10:52:54] "[35m[1mGET /object/27548824-791f-4fda-806d-5f88a1f7c834 HTTP/1.1[0m" 500 -

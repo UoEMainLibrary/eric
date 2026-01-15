@@ -1,0 +1,181 @@
+from flask import Flask, jsonify, request, redirect, url_for, make_response, abort
+from flask_sqlalchemy import SQLAlchemy
+from flask_uuid import FlaskUUID
+from sqlalchemy_utils import UUIDType
+from sqlalchemy.orm import joinedload
+import uuid
+import os
+
+app = Flask(__name__)
+
+# Absolute path to the DB in the same folder as app.py
+db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'eric.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
+# Optional: show SQL statements for debugging
+# app.config['SQLALCHEMY_ECHO'] = True
+app.config['JSON_SORT_KEYS'] = False
+
+db = SQLAlchemy(app)
+FlaskUUID(app)
+
+# ------------------------------------------------------------
+# MODELS
+# ------------------------------------------------------------
+
+class ObjectType(db.Model):
+    __tablename__ = 'object_type'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(128), nullable=False)
+    url_construct = db.Column(db.String(256), nullable=True)
+    objects = db.relationship("Object", backref="type", lazy=True)
+
+
+class Object(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    uuid = db.Column(UUIDType(binary=False), default=uuid.uuid4, unique=True, nullable=False)
+    type_id = db.Column(db.Integer, db.ForeignKey('object_type.id'), nullable=False)
+    primary_id = db.Column(db.String(64))
+    identifiers = db.relationship("Identifier", backref="object", lazy=True)
+
+
+class IdentifierType(db.Model):
+    __tablename__ = 'identifier_type'
+    id = db.Column(db.Integer, primary_key=True)
+    shortcode = db.Column(db.String(32), nullable=False, unique=True)
+    description = db.Column(db.String(128), nullable=False)
+    url_construct = db.Column(db.String(256), nullable=True)
+
+
+class Identifier(db.Model):
+    id = db.Column(db.String(256), primary_key=True)
+    object_id = db.Column(db.Integer, db.ForeignKey('object.id'), nullable=False)
+    type_id = db.Column(db.Integer, db.ForeignKey('identifier_type.id'), nullable=False)
+    type = db.relationship("IdentifierType", lazy=False)
+
+
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
+
+def construct_url(url_format, id):
+    if url_format and id:
+        return url_format.replace("<id>", id)
+    return None
+
+
+@app.errorhandler(404)
+def not_found(error):
+    return make_response(jsonify({'status': 404, 'error': 'Not found'}), 404)
+
+
+# ------------------------------------------------------------
+# ROUTES
+# ------------------------------------------------------------
+
+@app.route('/')
+def index():
+    return 'Welcome to ERIC — Identifier Resolver Service'
+
+
+@app.route('/object/<int:object_id>')
+@app.route('/resolve/<identifier>')
+def redirect_id_to_uuid(object_id=None, identifier=None):
+    if object_id:
+        obj = Object.query.get_or_404(object_id)
+        return redirect(url_for('view_object', uuid=obj.uuid))
+
+    elif identifier:
+        ident = Identifier.query.get_or_404(identifier)
+        return redirect(url_for('view_object', uuid=ident.object.uuid))
+
+    abort(404)
+
+
+@app.route('/object/<uuid:uuid>')
+def view_object(uuid):
+    obj = Object.query.options(joinedload(Object.identifiers)).filter(Object.uuid == uuid).first_or_404()
+
+    obj_dict = {
+        "id": obj.id,
+        "uuid": str(obj.uuid),
+        "type": obj.type.name,
+        "primary_url": construct_url(obj.type.url_construct, obj.primary_id),
+        "identifiers": [
+            {
+                "type": id.type.description,
+                "shortcode": id.type.shortcode,
+                "identifier": id.id,
+                "url": construct_url(id.type.url_construct, id.id)
+            }
+            for id in obj.identifiers
+        ]
+    }
+    return jsonify(obj_dict)
+
+
+@app.route('/identifier/<identifier>')
+def view_identifier(identifier):
+    ident = Identifier.query.get_or_404(identifier)
+
+    obj_dict = {
+        "identifier": ident.id,
+        "type": ident.type.description,
+        "eric_uuid": str(ident.object.uuid),
+        "eric_url": url_for('view_object', uuid=ident.object.uuid, _external=True),
+        "url": construct_url(ident.type.url_construct, ident.id),
+    }
+    return jsonify(obj_dict)
+
+
+@app.route('/convert/<identifier>/<desired_type>', endpoint="convert")
+@app.route('/redirect/<identifier>/<desired_type>', endpoint="redirect")
+def convert_identifier(identifier, desired_type):
+    obj_sub = Identifier.query.filter(Identifier.id == identifier).subquery()
+
+    ident = Identifier.query.join(IdentifierType).filter(
+        Identifier.object_id == obj_sub.c.object_id,
+        IdentifierType.shortcode == desired_type
+    ).first_or_404()
+
+    if request.endpoint == "redirect":
+        return redirect(construct_url(ident.type.url_construct, ident.id))
+
+    return jsonify({
+        "identifier": ident.id,
+        "type": ident.type.description,
+        "shortcode": ident.type.shortcode,
+        "url": construct_url(ident.type.url_construct, ident.id)
+    })
+
+
+# ------------------------------------------------------------
+# DATABASE INIT
+# ------------------------------------------------------------
+
+def init_identifier_types():
+    """Create identifier types if missing."""
+    defaults = [
+        ("ark", "Archival Resource Key", "https://n2t.net/ark:/83794/<id>"),
+        ("luna", "LUNA Image ID", "https://images.is.ed.ac.uk/luna/servlet/detail/<id>"),
+        ("arch", "Archipelago UUID", "https://digital.collections.ed.ac.uk/do/<id>"),
+        ("file", "Source Filename", None),
+        ("cantaloupe", "IIIF Cantaloupe ID", "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/<id>/full/600,/0/default.jpg")
+    ]
+
+    for shortcode, desc, url in defaults:
+        existing = IdentifierType.query.filter_by(shortcode=shortcode).first()
+        if not existing:
+            db.session.add(IdentifierType(shortcode=shortcode, description=desc, url_construct=url))
+            print(f"Added identifier type: {shortcode}")
+
+    db.session.commit()
+
+
+if __name__ == '__main__':
+    if not os.path.exists("eric.db"):
+        print("Creating ERIC database...")
+        with app.app_context():
+            db.create_all()
+            init_identifier_types()
+
+    app.run(debug=True)
