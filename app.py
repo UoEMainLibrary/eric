@@ -11,9 +11,8 @@ app = Flask(__name__)
 # ------------------------------------------------------------
 # DATABASE CONFIGURATION (MySQL)
 # ------------------------------------------------------------
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://liblabs_user:hikdlD3Nv7WcWuLT@localhost/liblabs_db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JSON_SORT_KEYS'] = False
+# Load config from file
+app.config.from_object('config')
 
 db = SQLAlchemy(app)
 FlaskUUID(app)
