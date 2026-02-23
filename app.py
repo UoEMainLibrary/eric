@@ -261,7 +261,7 @@ def simulate_images_host(subpath):
 
 
 # ------------------------------------------------------------
-# ARK RESOLUTION (simple version)
+# ARK RESOLUTION WITH HTML VIEW
 # ------------------------------------------------------------
 @app.route("/ark:/<naan>/<path:suffix>")
 def resolve_ark(naan, suffix):
@@ -283,17 +283,50 @@ def resolve_ark(naan, suffix):
     if not obj:
         abort(404)
 
-    # Find Archipelago identifier
-    arch_ident = next(
-        (i for i in obj.identifiers if i.type.shortcode == "arch"),
-        None
-    )
+    # Check for format query param
+    fmt = request.args.get("format")
 
+    if fmt == "html":
+        # Render metadata as a simple HTML page
+        html_rows = []
+        for i in obj.identifiers:
+            url = construct_url(i.type.url_construct, i.id) or i.id
+            html_rows.append(
+                f"<tr><td>{escape(i.type.shortcode)}</td>"
+                f"<td><a href='{escape(url)}'>{escape(i.id)}</a></td></tr>"
+            )
+
+        html = f"""
+        <html>
+        <head>
+            <title>ARK Lookup: {escape(full_ark)}</title>
+            <style>
+                body {{ font-family: sans-serif; margin: 40px; }}
+                table {{ border-collapse: collapse; width: 80%; }}
+                td, th {{ border: 1px solid #ddd; padding: 8px; }}
+                th {{ background-color: #f4f4f4; }}
+            </style>
+        </head>
+        <body>
+            <h2>ARK Lookup</h2>
+            <p><strong>ARK:</strong> {escape(full_ark)}</p>
+            <p><strong>Internal UUID:</strong> {escape(str(obj.uuid))}</p>
+            <p><strong>Primary ID:</strong> {escape(obj.primary_id)}</p>
+            <table>
+                <tr><th>Identifier Type</th><th>Value</th></tr>
+                {''.join(html_rows)}
+            </table>
+        </body>
+        </html>
+        """
+        return html
+
+    # Default redirect → Archipelago detail page
+    arch_ident = next((i for i in obj.identifiers if i.type.shortcode == "arch"), None)
     if not arch_ident:
         abort(404)
 
     arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
-
     return redirect(arch_url, code=302)
 
 # ------------------------------------------------------------
