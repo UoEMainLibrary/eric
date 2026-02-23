@@ -261,7 +261,7 @@ def simulate_images_host(subpath):
 
 
 # ------------------------------------------------------------
-# ARK RESOLUTION WITH HTML VIEW
+# ARK RESOLUTION WITH MULTIPLE FORMATS
 # ------------------------------------------------------------
 @app.route("/ark:/<naan>/<path:suffix>")
 def resolve_ark(naan, suffix):
@@ -283,11 +283,11 @@ def resolve_ark(naan, suffix):
     if not obj:
         abort(404)
 
-    # Check for format query param
+    # Determine requested format
     fmt = request.args.get("format")
 
+    # --- HTML Metadata ---
     if fmt == "html":
-        # Render metadata as a simple HTML page
         html_rows = []
         for i in obj.identifiers:
             url = construct_url(i.type.url_construct, i.id) or i.id
@@ -321,7 +321,36 @@ def resolve_ark(naan, suffix):
         """
         return html
 
-    # Default redirect → Archipelago detail page
+    # --- JSON Metadata ---
+    elif fmt == "json":
+        all_ids = {}
+        for i in obj.identifiers:
+            url = construct_url(i.type.url_construct, i.id) or i.id
+            all_ids[i.type.shortcode] = url
+
+        return jsonify({
+            "ark": full_ark,
+            "uuid": str(obj.uuid),
+            "primary_id": obj.primary_id,
+            "object_type": obj.type.name if obj.type else None,
+            "identifiers": all_ids
+        })
+
+    # --- Future ARK Info endpoint ---
+    elif fmt == "info":
+        # Minimal info page per ARK specification
+        info = {
+            "ark": full_ark,
+            "naan": naan,
+            "policy": "This ARK is maintained by University of Edinburgh Digital Collections.",
+            "target": construct_url(
+                next((i.type.url_construct for i in obj.identifiers if i.type.shortcode=="arch"), None),
+                next((i.id for i in obj.identifiers if i.type.shortcode=="arch"), None)
+            )
+        }
+        return jsonify(info)
+
+    # --- Default: redirect to canonical detail page ---
     arch_ident = next((i for i in obj.identifiers if i.type.shortcode == "arch"), None)
     if not arch_ident:
         abort(404)
