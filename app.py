@@ -259,6 +259,43 @@ def luna_iiif(identifier, iiif_params):
 def simulate_images_host(subpath):
     return redirect(f"/{subpath}", code=302)
 
+
+# ------------------------------------------------------------
+# ARK RESOLUTION (simple version)
+# ------------------------------------------------------------
+@app.route("/ark:/<naan>/<path:suffix>")
+def resolve_ark(naan, suffix):
+    if naan != NAAN:
+        abort(404)
+
+    full_ark = f"ark:/{naan}/{suffix}"
+
+    ident = Identifier.query.filter_by(id=full_ark).first()
+    if not ident:
+        abort(404)
+
+    obj = (
+        Object.query
+        .options(joinedload(Object.identifiers).joinedload(Identifier.type))
+        .filter_by(id=ident.object_id)
+        .first()
+    )
+    if not obj:
+        abort(404)
+
+    # Find Archipelago identifier
+    arch_ident = next(
+        (i for i in obj.identifiers if i.type.shortcode == "arch"),
+        None
+    )
+
+    if not arch_ident:
+        abort(404)
+
+    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
+
+    return redirect(arch_url, code=302)
+
 # ------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------
