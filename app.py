@@ -1,9 +1,17 @@
+# ERIC is a Flask resolver for University of Edinburgh Digital Libraries
+# identifiers, linking LUNA, Archipelago, IIIF/Cantaloupe, filenames, and ARKs
+# for the same digital objects.
+# This file is version controlled; prefer small, reviewable changes with clear
+# intent so routing and identifier-resolution behaviour can be traced over time.
+
 from flask import Flask, jsonify, request, redirect, url_for, make_response, abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_uuid import FlaskUUID
 from sqlalchemy_utils import UUIDType
 from sqlalchemy.orm import joinedload
 from markupsafe import escape
+from urllib.parse import unquote, urlparse
+import re
 import uuid
 
 app = Flask(__name__)
@@ -47,10 +55,18 @@ class IdentifierType(db.Model):
     description = db.Column(db.String(128), nullable=False)
     url_construct = db.Column(db.String(256), nullable=True)
 
+class LunaRoute(db.Model):
+    __tablename__ = "luna_route"
+    id = db.Column(db.Integer, primary_key=True)
+    token = db.Column(db.String(64), unique=True, nullable=False)
+    route_type = db.Column(db.String(64), nullable=False)
+    target_url = db.Column(db.String(2048), nullable=False)
+
 # ------------------------------------------------------------
 # ARK MINTING
 # ------------------------------------------------------------
 NAAN = "83794"
+LUNA_IDENTIFIER_RE = re.compile(r"\b[A-Za-z0-9]+~\d+~\d+~\d+~\d+\b")
 
 def mint_ark():
     suffix = str(uuid.uuid4())
@@ -62,6 +78,52 @@ def mint_ark():
 def construct_url(url_format, id):
     if url_format and id:
         return url_format.replace("<id>", id)
+    return None
+
+def fetch_object_for_identifier(identifier):
+    ident = Identifier.query.filter_by(id=identifier).first()
+    if not ident:
+        abort(404)
+
+    obj = (
+        Object.query
+        .options(joinedload(Object.identifiers).joinedload(Identifier.type))
+        .filter_by(id=ident.object_id)
+        .first()
+    )
+    if not obj:
+        abort(404)
+
+    return ident, obj
+
+def get_identifier_by_shortcode(obj, shortcode):
+    return next((i for i in obj.identifiers if i.type.shortcode == shortcode), None)
+
+def redirect_luna_identifier_to_arch(identifier):
+    identifier = identifier.split(":", 1)[0]
+    _, obj = fetch_object_for_identifier(identifier)
+
+    arch_ident = get_identifier_by_shortcode(obj, "arch")
+    if not arch_ident:
+        abort(404)
+
+    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
+    return redirect(arch_url, code=302)
+
+def extract_luna_identifier_from_target(target_url):
+    parsed = urlparse(target_url)
+    decoded = unquote(target_url)
+
+    if "/luna/servlet/detail/" in parsed.path:
+        return parsed.path.split("/luna/servlet/detail/", 1)[1].split(":", 1)[0]
+
+    if "/luna/servlet/widget/detail/" in parsed.path:
+        return parsed.path.split("/luna/servlet/widget/detail/", 1)[1].split(":", 1)[0]
+
+    match = LUNA_IDENTIFIER_RE.search(decoded)
+    if match:
+        return match.group(0)
+
     return None
 
 def init_identifier_types():
@@ -199,47 +261,22 @@ def lookup(identifier_value):
 # ------------------------------------------------------------
 # NEW: LUNA DETAIL → ARCH
 # ------------------------------------------------------------
-@app.route("/luna/servlet/detail/<identifier>")
+@app.route("/luna/servlet/detail/<path:identifier>")
 def luna_detail(identifier):
-    ident = Identifier.query.filter_by(id=identifier).first()
-    if not ident:
-        abort(404)
+    return redirect_luna_identifier_to_arch(identifier)
 
-    obj = (
-        Object.query
-        .options(joinedload(Object.identifiers).joinedload(Identifier.type))
-        .filter_by(id=ident.object_id)
-        .first()
-    )
-    if not obj:
-        abort(404)
-
-    arch_ident = next((i for i in obj.identifiers if i.type.shortcode == "arch"), None)
-    if not arch_ident:
-        abort(404)
-
-    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
-    return redirect(arch_url, code=302)
+@app.route("/luna/servlet/widget/detail/<path:identifier>")
+def luna_widget_detail(identifier):
+    return redirect_luna_identifier_to_arch(identifier)
 
 # ------------------------------------------------------------
 # NEW: LUNA IIIF → CANTALOUPE
 # ------------------------------------------------------------
 @app.route("/luna/servlet/iiif/<identifier>/<path:iiif_params>")
 def luna_iiif(identifier, iiif_params):
-    ident = Identifier.query.filter_by(id=identifier).first()
-    if not ident:
-        abort(404)
+    _, obj = fetch_object_for_identifier(identifier)
 
-    obj = (
-        Object.query
-        .options(joinedload(Object.identifiers).joinedload(Identifier.type))
-        .filter_by(id=ident.object_id)
-        .first()
-    )
-    if not obj:
-        abort(404)
-
-    cant_ident = next((i for i in obj.identifiers if i.type.shortcode == "cantaloupe"), None)
+    cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
     if not cant_ident:
         abort(404)
 
@@ -253,11 +290,71 @@ def luna_iiif(identifier, iiif_params):
     return redirect(final_url, code=302)
 
 # ------------------------------------------------------------
+# NEW: LEGACY LUNA TINYURL → ARCH
+# ------------------------------------------------------------
+@app.route("/luna/servlet/s/<token>")
+def luna_shortlink(token):
+    row = LunaRoute.query.filter_by(token=token).first()
+    if not row:
+        abort(404)
+
+    identifier = extract_luna_identifier_from_target(row.target_url)
+    if not identifier:
+        abort(404)
+
+    return redirect_luna_identifier_to_arch(identifier)
+
+# ------------------------------------------------------------
+# NEW: MEDIAMANAGER → CANTALOUPE
+# ------------------------------------------------------------
+@app.route("/MediaManager/srvr")
+def media_manager():
+    mediafile = request.args.get("mediafile")
+    if not mediafile:
+        abort(404)
+
+    parts = mediafile.strip("/").split("/")
+    if len(parts) < 2:
+        abort(404)
+
+    size = parts[0]
+    filename = parts[-1]
+
+    size_map = {
+        "Size3": 384,
+        "Size4": 768,
+    }
+
+    pixels = size_map.get(size)
+    if not pixels:
+        abort(404)
+
+    stem = filename.rsplit(".", 1)[0]
+    file_identifier = f"{stem}.tif"
+
+    _, obj = fetch_object_for_identifier(file_identifier)
+
+    cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
+    if not cant_ident:
+        abort(404)
+
+    final_url = (
+        "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/"
+        f"{cant_ident.id}/full/!{pixels},{pixels}/0/default.jpg"
+    )
+
+    return redirect(final_url, code=302)
+
+# ------------------------------------------------------------
 # NEW: Test images.is.ed.ac.uk paths without DNS changes
 # ------------------------------------------------------------
 @app.route("/images.is.ed.ac.uk/<path:subpath>")
 def simulate_images_host(subpath):
-    return redirect(f"/{subpath}", code=302)
+    qs = request.query_string.decode()
+    target = f"/{subpath}"
+    if qs:
+        target = f"{target}?{qs}"
+    return redirect(target, code=302)
 
 
 # ------------------------------------------------------------
@@ -366,4 +463,3 @@ if __name__ == '__main__':
         db.create_all()
         init_identifier_types()
     app.run(debug=True)
-
