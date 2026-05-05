@@ -11,6 +11,7 @@ from sqlalchemy_utils import UUIDType
 from sqlalchemy.orm import joinedload
 from markupsafe import escape
 from urllib.parse import unquote, urlparse
+import requests
 import re
 import uuid
 
@@ -98,6 +99,30 @@ def fetch_object_for_identifier(identifier):
 
 def get_identifier_by_shortcode(obj, shortcode):
     return next((i for i in obj.identifiers if i.type.shortcode == shortcode), None)
+
+def get_cantaloupe_base_url(cant_identifier):
+    cant_url = construct_url(cant_identifier.type.url_construct, cant_identifier.id)
+    if not cant_url:
+        abort(404)
+    return cant_url.rsplit("/", 4)[0]
+
+def fetch_iiif_dimensions(cant_identifier):
+    info_url = f"{get_cantaloupe_base_url(cant_identifier)}/info.json"
+    response = requests.get(info_url, timeout=5)
+    response.raise_for_status()
+
+    info = response.json()
+    width = info.get("width")
+    height = info.get("height")
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise ValueError("IIIF info.json missing integer width/height")
+
+    return width, height
+
+def build_long_side_size_param(width, height, pixels):
+    if width >= height:
+        return f"{pixels},"
+    return f",{pixels}"
 
 def redirect_luna_identifier_to_arch(identifier):
     identifier = identifier.split(":", 1)[0]
@@ -280,11 +305,7 @@ def luna_iiif(identifier, iiif_params):
     if not cant_ident:
         abort(404)
 
-    # Base URL from DB is ".../<id>/full/600,/0/default.jpg"
-    cant_url = construct_url(cant_ident.type.url_construct, cant_ident.id)
-
-    # Trim everything after the identifier
-    cant_url = cant_url.rsplit("/", 4)[0]
+    cant_url = get_cantaloupe_base_url(cant_ident)
 
     final_url = f"{cant_url}/{iiif_params}"
     return redirect(final_url, code=302)
@@ -338,9 +359,19 @@ def media_manager():
     if not cant_ident:
         abort(404)
 
+    try:
+        width, height = fetch_iiif_dimensions(cant_ident)
+        size_param = build_long_side_size_param(width, height, pixels)
+    except (requests.RequestException, ValueError) as exc:
+        app.logger.warning(
+            "Falling back to bounded IIIF size for %s after info.json lookup failed: %s",
+            cant_ident.id,
+            exc,
+        )
+        size_param = f"!{pixels},{pixels}"
+
     final_url = (
-        "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/"
-        f"{cant_ident.id}/full/!{pixels},{pixels}/0/default.jpg"
+        f"{get_cantaloupe_base_url(cant_ident)}/full/{size_param}/0/default.jpg"
     )
 
     return redirect(final_url, code=302)

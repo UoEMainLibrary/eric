@@ -53,9 +53,43 @@ Size3 -> 384 pixels on the long side
 Size4 -> 768 pixels on the long side
 ```
 
+Because `Size3` and `Size4` are defined in terms of the long side, ERIC should
+read the target image's `info.json` before building the IIIF size segment:
+
+```text
+landscape -> /384,/ or /768,/
+portrait  -> /,384/ or /,768/
+```
+
 Suggested route:
 
 ```python
+import requests
+
+def get_cantaloupe_base_url(cant_identifier):
+    cant_url = construct_url(cant_identifier.type.url_construct, cant_identifier.id)
+    if not cant_url:
+        abort(404)
+    return cant_url.rsplit("/", 4)[0]
+
+def fetch_iiif_dimensions(cant_identifier):
+    info_url = f"{get_cantaloupe_base_url(cant_identifier)}/info.json"
+    response = requests.get(info_url, timeout=5)
+    response.raise_for_status()
+
+    info = response.json()
+    width = info.get("width")
+    height = info.get("height")
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise ValueError("IIIF info.json missing integer width/height")
+
+    return width, height
+
+def build_long_side_size_param(width, height, pixels):
+    if width >= height:
+        return f"{pixels},"
+    return f",{pixels}"
+
 @app.route("/MediaManager/srvr")
 def media_manager():
     mediafile = request.args.get("mediafile")
@@ -101,16 +135,22 @@ def media_manager():
     if not cant_ident:
         abort(404)
 
+    try:
+        width, height = fetch_iiif_dimensions(cant_ident)
+        size_param = build_long_side_size_param(width, height, pixels)
+    except (requests.RequestException, ValueError):
+        size_param = f"!{pixels},{pixels}"
+
     final_url = (
-        "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/"
-        f"{cant_ident.id}/full/!{pixels},{pixels}/0/default.jpg"
+        f"{get_cantaloupe_base_url(cant_ident)}/full/{size_param}/0/default.jpg"
     )
 
     return redirect(final_url, code=302)
 ```
 
-The `!768,768` and `!384,384` IIIF sizes preserve aspect ratio and constrain
-the long side to the required size.
+The bounded `!768,768` and `!384,384` forms remain a safe fallback if
+`info.json` cannot be fetched, but the preferred redirect is the explicit
+long-side form chosen from the actual image dimensions.
 
 For local testing with copied URLs under `/images.is.ed.ac.uk/...`, preserve the
 query string in the existing simulation route:
