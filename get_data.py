@@ -32,7 +32,7 @@ PAGE_LIMIT = 50
 REQUEST_TIMEOUT = 30
 
 LUNA_IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z0-9]+~\d+~\d+~\d+~\d+\b")
-IIIF_INFO_PATTERN = re.compile(r'data-iiif-infojson="[^"]*/iiif/2/([^"]+)/info\.json"')
+IIIF_INFO_PATTERN = re.compile(r'data-iiif-infojson="([^"]*/iiif/2/([^"]+)/info\.json)"')
 IIIF_FILENAME_PATTERN = re.compile(
     r"image-([^.\/]+)-[0-9a-fA-F-]+\.tif$",
     re.IGNORECASE,
@@ -217,6 +217,41 @@ def iter_string_values(value):
             yield from iter_string_values(nested)
 
 
+def coerce_int(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+def extract_dimensions_from_value(value):
+    if isinstance(value, dict):
+        width = coerce_int(value.get("width"))
+        height = coerce_int(value.get("height"))
+        if width and height:
+            return width, height
+
+        for nested in value.values():
+            dimensions = extract_dimensions_from_value(nested)
+            if dimensions:
+                return dimensions
+
+    elif isinstance(value, list):
+        for nested in value:
+            dimensions = extract_dimensions_from_value(nested)
+            if dimensions:
+                return dimensions
+
+    return None
+
+
 def normalise_cantaloupe_candidate(candidate):
     candidate = candidate.strip()
     encoded_match = CANTALOUPE_ID_PATTERN.search(candidate)
@@ -259,7 +294,30 @@ def extract_cantaloupe_identifier_from_image(image_data, filename):
     return None
 
 
-def fetch_cantaloupe_map(session, arch_uuid, cache, verbose=True):
+def fetch_iiif_dimensions(session, info_url, cache, verbose=True):
+    info_url = unescape(info_url)
+    if info_url in cache:
+        return cache[info_url]
+
+    log(f"  Fetching IIIF info.json {info_url}...", verbose)
+    response = session.get(
+        info_url,
+        headers={"Accept": "application/json"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+
+    payload = response.json()
+    width = coerce_int(payload.get("width"))
+    height = coerce_int(payload.get("height"))
+    if not width or not height:
+        raise ValueError(f"Missing width/height in IIIF info.json: {info_url}")
+
+    cache[info_url] = (width, height)
+    return cache[info_url]
+
+
+def fetch_cantaloupe_data(session, arch_uuid, cache, verbose=True):
     if arch_uuid in cache:
         return cache[arch_uuid]
 
@@ -270,11 +328,15 @@ def fetch_cantaloupe_map(session, arch_uuid, cache, verbose=True):
 
     mapping = {}
     for match in IIIF_INFO_PATTERN.finditer(response.text):
-        cantaloupe_id = unescape(match.group(1))
+        info_url = unescape(match.group(1))
+        cantaloupe_id = unescape(match.group(2))
         filename_match = IIIF_FILENAME_PATTERN.search(unquote(cantaloupe_id))
         if not filename_match:
             continue
-        mapping[f"{filename_match.group(1)}.tif"] = cantaloupe_id
+        mapping[f"{filename_match.group(1)}.tif"] = {
+            "cantaloupe": cantaloupe_id,
+            "info_url": info_url,
+        }
 
     cache[arch_uuid] = mapping
     return mapping
@@ -343,7 +405,7 @@ def write_recent_items(rows):
     with open(RECENT_ITEMS_CSV, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["object_type", "luna", "arch", "file", "cantaloupe"],
+            fieldnames=["object_type", "luna", "arch", "file", "cantaloupe", "width", "height"],
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -399,6 +461,7 @@ def main():
 
     luna_cache = {}
     cantaloupe_cache = {}
+    iiif_info_cache = {}
     recent_rows = []
     tinyurl_rows = []
 
@@ -412,7 +475,7 @@ def main():
         if not isinstance(images, dict):
             continue
 
-        cantaloupe_map = fetch_cantaloupe_map(
+        cantaloupe_data = fetch_cantaloupe_data(
             session,
             arch_uuid,
             cantaloupe_cache,
@@ -435,9 +498,10 @@ def main():
                 print(f"Warning: Could not fetch LUNA ID for {filename}: {exc}")
                 luna_identifier = None
 
+            mapped_cantaloupe = cantaloupe_data.get(filename, {})
             cantaloupe_identifier = extract_cantaloupe_identifier_from_image(img, filename)
             if not cantaloupe_identifier:
-                cantaloupe_identifier = cantaloupe_map.get(filename)
+                cantaloupe_identifier = mapped_cantaloupe.get("cantaloupe")
             if not cantaloupe_identifier:
                 print(
                     f"Warning: Could not find Cantaloupe ID for {filename} "
@@ -448,6 +512,20 @@ def main():
                     print(json.dumps(img, indent=2, sort_keys=True)[:4000], flush=True)
                     cantaloupe_debug_dumped = True
 
+            dimensions = extract_dimensions_from_value(img)
+            if not dimensions and mapped_cantaloupe.get("info_url"):
+                try:
+                    dimensions = fetch_iiif_dimensions(
+                        session,
+                        mapped_cantaloupe["info_url"],
+                        iiif_info_cache,
+                        verbose=verbose,
+                    )
+                except Exception as exc:
+                    print(f"Warning: Could not fetch IIIF dimensions for {filename}: {exc}")
+
+            width, height = dimensions or ("", "")
+
             recent_rows.append(
                 {
                     "object_type": "Image",
@@ -455,6 +533,8 @@ def main():
                     "arch": arch_uuid,
                     "file": filename,
                     "cantaloupe": cantaloupe_identifier or "",
+                    "width": width,
+                    "height": height,
                 }
             )
 

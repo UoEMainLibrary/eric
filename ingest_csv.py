@@ -1,6 +1,20 @@
 import csv
 import uuid
-from app import app, db, Identifier, IdentifierType, Object, ObjectType, mint_ark
+from app import app, db, Identifier, IdentifierType, ImageDimensions, Object, ObjectType, mint_ark
+
+
+def parse_optional_int(value):
+    if value is None:
+        return None
+
+    value = str(value).strip()
+    if not value:
+        return None
+
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 with app.app_context():
 
@@ -23,6 +37,17 @@ with app.app_context():
             )
             db.session.add(obj)
             db.session.commit()
+
+            width = parse_optional_int(row.get("width"))
+            height = parse_optional_int(row.get("height"))
+            if width is not None and height is not None:
+                db.session.add(
+                    ImageDimensions(
+                        object_id=obj.id,
+                        width=width,
+                        height=height,
+                    )
+                )
 
             # 3. Insert identifiers for this object
             ids_to_add = {
@@ -61,4 +86,3 @@ with app.app_context():
             db.session.commit()
 
         print("CSV ingestion complete!")
-

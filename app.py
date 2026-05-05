@@ -7,11 +7,11 @@
 from flask import Flask, jsonify, request, redirect, url_for, make_response, abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_uuid import FlaskUUID
+from sqlalchemy import inspect
 from sqlalchemy_utils import UUIDType
 from sqlalchemy.orm import joinedload
 from markupsafe import escape
 from urllib.parse import unquote, urlparse
-import requests
 import re
 import uuid
 
@@ -49,6 +49,12 @@ class Identifier(db.Model):
     type_id = db.Column(db.Integer, db.ForeignKey('identifier_type.id'), nullable=False)
     type = db.relationship('IdentifierType', lazy=False, backref=db.backref('identifiers', lazy=True))
 
+class ImageDimensions(db.Model):
+    __tablename__ = "image_dimensions"
+    object_id = db.Column(db.Integer, db.ForeignKey('object.id'), primary_key=True)
+    width = db.Column(db.Integer, nullable=False)
+    height = db.Column(db.Integer, nullable=False)
+
 class IdentifierType(db.Model):
     __tablename__ = 'identifier_type'
     id = db.Column(db.Integer, primary_key=True)
@@ -68,6 +74,7 @@ class LunaRoute(db.Model):
 # ------------------------------------------------------------
 NAAN = "83794"
 LUNA_IDENTIFIER_RE = re.compile(r"\b[A-Za-z0-9]+~\d+~\d+~\d+~\d+\b")
+_image_dimensions_table_exists = None
 
 def mint_ark():
     suffix = str(uuid.uuid4())
@@ -106,23 +113,26 @@ def get_cantaloupe_base_url(cant_identifier):
         abort(404)
     return cant_url.rsplit("/", 4)[0]
 
-def fetch_iiif_dimensions(cant_identifier):
-    info_url = f"{get_cantaloupe_base_url(cant_identifier)}/info.json"
-    response = requests.get(info_url, timeout=5)
-    response.raise_for_status()
-
-    info = response.json()
-    width = info.get("width")
-    height = info.get("height")
-    if not isinstance(width, int) or not isinstance(height, int):
-        raise ValueError("IIIF info.json missing integer width/height")
-
-    return width, height
-
 def build_long_side_size_param(width, height, pixels):
     if width >= height:
         return f"{pixels},"
     return f",{pixels}"
+
+def image_dimensions_table_exists():
+    global _image_dimensions_table_exists
+    if _image_dimensions_table_exists is None:
+        _image_dimensions_table_exists = inspect(db.engine).has_table("image_dimensions")
+    return _image_dimensions_table_exists
+
+def fetch_object_dimensions(object_id):
+    if not image_dimensions_table_exists():
+        return None, None
+
+    dims = ImageDimensions.query.filter_by(object_id=object_id).first()
+    if not dims:
+        return None, None
+
+    return dims.width, dims.height
 
 def redirect_luna_identifier_to_arch(identifier):
     identifier = identifier.split(":", 1)[0]
@@ -359,14 +369,13 @@ def media_manager():
     if not cant_ident:
         abort(404)
 
-    try:
-        width, height = fetch_iiif_dimensions(cant_ident)
+    width, height = fetch_object_dimensions(obj.id)
+    if width is not None and height is not None:
         size_param = build_long_side_size_param(width, height, pixels)
-    except (requests.RequestException, ValueError) as exc:
+    else:
         app.logger.warning(
-            "Falling back to bounded IIIF size for %s after info.json lookup failed: %s",
+            "Falling back to bounded IIIF size for %s because no stored dimensions were found",
             cant_ident.id,
-            exc,
         )
         size_param = f"!{pixels},{pixels}"
 

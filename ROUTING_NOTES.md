@@ -53,42 +53,45 @@ Size3 -> 384 pixels on the long side
 Size4 -> 768 pixels on the long side
 ```
 
-Because `Size3` and `Size4` are defined in terms of the long side, ERIC should
-read the target image's `info.json` before building the IIIF size segment:
+Because `Size3` and `Size4` are defined in terms of the long side, ERIC needs
+to know whether the source image is landscape or portrait before building the
+IIIF size segment:
 
 ```text
 landscape -> /384,/ or /768,/
 portrait  -> /,384/ or /,768/
 ```
 
-Suggested route:
+That orientation decision should not depend on LUNA being available at request
+time. The safer approach is:
+
+1. During data generation in `get_data.py`, extract `width` and `height` from
+   Archipelago image metadata where possible.
+2. If Archipelago metadata does not expose them directly, fetch the IIIF
+   `info.json` during ingest and store the dimensions in ERIC's database.
+3. At redirect time, read the stored dimensions and build the IIIF size segment
+   locally, falling back to `!<pixels>,<pixels>` only if no stored dimensions
+   are available.
+
+Suggested runtime route:
 
 ```python
-import requests
-
 def get_cantaloupe_base_url(cant_identifier):
     cant_url = construct_url(cant_identifier.type.url_construct, cant_identifier.id)
     if not cant_url:
         abort(404)
     return cant_url.rsplit("/", 4)[0]
 
-def fetch_iiif_dimensions(cant_identifier):
-    info_url = f"{get_cantaloupe_base_url(cant_identifier)}/info.json"
-    response = requests.get(info_url, timeout=5)
-    response.raise_for_status()
-
-    info = response.json()
-    width = info.get("width")
-    height = info.get("height")
-    if not isinstance(width, int) or not isinstance(height, int):
-        raise ValueError("IIIF info.json missing integer width/height")
-
-    return width, height
-
 def build_long_side_size_param(width, height, pixels):
     if width >= height:
         return f"{pixels},"
     return f",{pixels}"
+
+def fetch_object_dimensions(object_id):
+    dims = ImageDimensions.query.filter_by(object_id=object_id).first()
+    if not dims:
+        return None, None
+    return dims.width, dims.height
 
 @app.route("/MediaManager/srvr")
 def media_manager():
@@ -135,10 +138,10 @@ def media_manager():
     if not cant_ident:
         abort(404)
 
-    try:
-        width, height = fetch_iiif_dimensions(cant_ident)
+    width, height = fetch_object_dimensions(obj.id)
+    if width is not None and height is not None:
         size_param = build_long_side_size_param(width, height, pixels)
-    except (requests.RequestException, ValueError):
+    else:
         size_param = f"!{pixels},{pixels}"
 
     final_url = (
@@ -148,9 +151,9 @@ def media_manager():
     return redirect(final_url, code=302)
 ```
 
-The bounded `!768,768` and `!384,384` forms remain a safe fallback if
-`info.json` cannot be fetched, but the preferred redirect is the explicit
-long-side form chosen from the actual image dimensions.
+The bounded `!768,768` and `!384,384` forms remain a safe fallback if ERIC does
+not yet have stored dimensions for the object, but the preferred redirect is
+the explicit long-side form chosen from the database-backed dimensions.
 
 For local testing with copied URLs under `/images.is.ed.ac.uk/...`, preserve the
 query string in the existing simulation route:
