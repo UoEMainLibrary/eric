@@ -145,6 +145,12 @@ def fetch_object_for_media_filename(filename):
 
         ident, obj = fetch_object_for_file_identifier(candidate)
         if ident and obj:
+            app.logger.info(
+                "MediaManager matched filename %s to file identifier %s (object_id=%s)",
+                filename,
+                ident.id,
+                obj.id,
+            )
             return ident, obj
 
     stem_matches = (
@@ -156,8 +162,19 @@ def fetch_object_for_media_filename(filename):
         .all()
     )
     if len(stem_matches) == 1:
+        app.logger.info(
+            "MediaManager matched filename %s via unique stem fallback to %s",
+            filename,
+            stem_matches[0].id,
+        )
         return fetch_object_for_identifier(stem_matches[0].id)
 
+    app.logger.warning(
+        "MediaManager could not match filename %s. Candidates tried=%s stem_matches=%s",
+        filename,
+        candidates,
+        [match.id for match in stem_matches],
+    )
     abort(404)
 
 def get_identifier_by_shortcode(obj, shortcode):
@@ -182,10 +199,18 @@ def image_dimensions_table_exists():
 
 def fetch_object_dimensions(object_id):
     if not image_dimensions_table_exists():
+        app.logger.warning(
+            "ImageDimensions table is missing; cannot look up stored dimensions for object_id=%s",
+            object_id,
+        )
         return None, None
 
     dims = ImageDimensions.query.filter_by(object_id=object_id).first()
     if not dims:
+        app.logger.info(
+            "No stored image dimensions found for object_id=%s",
+            object_id,
+        )
         return None, None
 
     return dims.width, dims.height
@@ -236,6 +261,13 @@ def init_identifier_types():
 # ------------------------------------------------------------
 @app.errorhandler(404)
 def not_found(error):
+    app.logger.warning(
+        "Flask 404 generated: host=%s path=%s query=%s url=%s",
+        request.host,
+        request.path,
+        request.query_string.decode(),
+        request.url,
+    )
     return make_response(jsonify({'status': 404, 'error': 'Not found'}), 404)
 
 # ------------------------------------------------------------
@@ -398,10 +430,19 @@ def luna_shortlink(token):
 def media_manager():
     mediafile = request.args.get("mediafile")
     if not mediafile:
+        app.logger.warning(
+            "MediaManager request missing mediafile parameter: url=%s",
+            request.url,
+        )
         abort(404)
 
     parts = mediafile.strip("/").split("/")
     if len(parts) < 2:
+        app.logger.warning(
+            "MediaManager request has unexpected mediafile format: mediafile=%s url=%s",
+            mediafile,
+            request.url,
+        )
         abort(404)
 
     size = parts[0]
@@ -414,17 +455,43 @@ def media_manager():
 
     pixels = size_map.get(size)
     if not pixels:
+        app.logger.warning(
+            "MediaManager request uses unsupported size %s for mediafile=%s",
+            size,
+            mediafile,
+        )
         abort(404)
 
-    _, obj = fetch_object_for_media_filename(filename)
+    app.logger.info(
+        "MediaManager request received: host=%s path=%s mediafile=%s size=%s filename=%s",
+        request.host,
+        request.path,
+        mediafile,
+        size,
+        filename,
+    )
+
+    matched_ident, obj = fetch_object_for_media_filename(filename)
 
     cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
     if not cant_ident:
+        app.logger.warning(
+            "MediaManager found object_id=%s for filename=%s but no cantaloupe identifier is present",
+            obj.id,
+            matched_ident.id if matched_ident else filename,
+        )
         abort(404)
 
     width, height = fetch_object_dimensions(obj.id)
     if width is not None and height is not None:
         size_param = build_long_side_size_param(width, height, pixels)
+        app.logger.info(
+            "MediaManager using stored dimensions for object_id=%s: width=%s height=%s size_param=%s",
+            obj.id,
+            width,
+            height,
+            size_param,
+        )
     else:
         app.logger.warning(
             "Falling back to bounded IIIF size for %s because no stored dimensions were found",
@@ -434,6 +501,14 @@ def media_manager():
 
     final_url = (
         f"{get_cantaloupe_base_url(cant_ident)}/full/{size_param}/0/default.jpg"
+    )
+    app.logger.info(
+        "MediaManager redirecting filename=%s matched_file=%s object_id=%s cantaloupe=%s final_url=%s",
+        filename,
+        matched_ident.id if matched_ident else None,
+        obj.id,
+        cant_ident.id,
+        final_url,
     )
 
     return redirect(final_url, code=302)
