@@ -7,7 +7,7 @@
 from flask import Flask, jsonify, request, redirect, url_for, make_response, abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_uuid import FlaskUUID
-from sqlalchemy import inspect
+from sqlalchemy import func, inspect
 from sqlalchemy_utils import UUIDType
 from sqlalchemy.orm import joinedload
 from markupsafe import escape
@@ -103,6 +103,62 @@ def fetch_object_for_identifier(identifier):
         abort(404)
 
     return ident, obj
+
+def fetch_object_for_file_identifier(identifier):
+    ident = (
+        Identifier.query
+        .join(Identifier.type)
+        .filter(IdentifierType.shortcode == "file")
+        .filter(func.lower(Identifier.id) == identifier.lower())
+        .first()
+    )
+    if not ident:
+        return None, None
+
+    obj = (
+        Object.query
+        .options(joinedload(Object.identifiers).joinedload(Identifier.type))
+        .filter_by(id=ident.object_id)
+        .first()
+    )
+    if not obj:
+        abort(404)
+
+    return ident, obj
+
+def fetch_object_for_media_filename(filename):
+    stem = filename.rsplit(".", 1)[0]
+    candidates = [
+        filename,
+        f"{stem}.tif",
+        f"{stem}.jp2",
+        f"{stem}.jpg",
+        f"{stem}.jpeg",
+    ]
+
+    seen = set()
+    for candidate in candidates:
+        normalised = candidate.lower()
+        if normalised in seen:
+            continue
+        seen.add(normalised)
+
+        ident, obj = fetch_object_for_file_identifier(candidate)
+        if ident and obj:
+            return ident, obj
+
+    stem_matches = (
+        Identifier.query
+        .join(Identifier.type)
+        .filter(IdentifierType.shortcode == "file")
+        .filter(func.lower(Identifier.id).like(f"{stem.lower()}.%"))
+        .limit(2)
+        .all()
+    )
+    if len(stem_matches) == 1:
+        return fetch_object_for_identifier(stem_matches[0].id)
+
+    abort(404)
 
 def get_identifier_by_shortcode(obj, shortcode):
     return next((i for i in obj.identifiers if i.type.shortcode == shortcode), None)
@@ -360,10 +416,7 @@ def media_manager():
     if not pixels:
         abort(404)
 
-    stem = filename.rsplit(".", 1)[0]
-    file_identifier = f"{stem}.tif"
-
-    _, obj = fetch_object_for_identifier(file_identifier)
+    _, obj = fetch_object_for_media_filename(filename)
 
     cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
     if not cant_ident:
