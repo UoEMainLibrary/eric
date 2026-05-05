@@ -18,7 +18,7 @@ def parse_optional_int(value):
 
 with app.app_context():
 
-    with open("eric_ingest.csv") as f:
+    with open("recent_items.csv") as f:
         reader = csv.DictReader(f)
 
         for row in reader:
