@@ -43,7 +43,8 @@ class ObjectType(db.Model):
     url_construct = db.Column(db.String(256), nullable=True)
 
 class Identifier(db.Model):
-    id = db.Column(db.String(128), primary_key=True)
+    id = db.Column(db.Integer, primary_key=True)
+    value = db.Column(db.String(128), unique=True, nullable=False, index=True)
     object_id = db.Column(db.Integer, db.ForeignKey('object.id'), nullable=False)
     object = db.relationship('Object', backref=db.backref('identifiers', lazy=True))
     type_id = db.Column(db.Integer, db.ForeignKey('identifier_type.id'), nullable=False)
@@ -51,7 +52,8 @@ class Identifier(db.Model):
 
 class ImageDimensions(db.Model):
     __tablename__ = "image_dimensions"
-    object_id = db.Column(db.Integer, db.ForeignKey('object.id'), primary_key=True)
+    id = db.Column(db.Integer, primary_key=True)
+    object_id = db.Column(db.Integer, db.ForeignKey('object.id'), nullable=False, unique=True, index=True)
     width = db.Column(db.Integer, nullable=False)
     height = db.Column(db.Integer, nullable=False)
 
@@ -89,7 +91,7 @@ def construct_url(url_format, id):
     return None
 
 def fetch_object_for_identifier(identifier):
-    ident = Identifier.query.filter_by(id=identifier).first()
+    ident = Identifier.query.filter_by(value=identifier).first()
     if not ident:
         abort(404)
 
@@ -109,7 +111,7 @@ def fetch_object_for_file_identifier(identifier):
         Identifier.query
         .join(Identifier.type)
         .filter(IdentifierType.shortcode == "file")
-        .filter(func.lower(Identifier.id) == identifier.lower())
+        .filter(func.lower(Identifier.value) == identifier.lower())
         .first()
     )
     if not ident:
@@ -148,7 +150,7 @@ def fetch_object_for_media_filename(filename):
             app.logger.info(
                 "MediaManager matched filename %s to file identifier %s (object_id=%s)",
                 filename,
-                ident.id,
+                ident.value,
                 obj.id,
             )
             return ident, obj
@@ -157,7 +159,7 @@ def fetch_object_for_media_filename(filename):
         Identifier.query
         .join(Identifier.type)
         .filter(IdentifierType.shortcode == "file")
-        .filter(func.lower(Identifier.id).like(f"{stem.lower()}.%"))
+        .filter(func.lower(Identifier.value).like(f"{stem.lower()}.%"))
         .limit(2)
         .all()
     )
@@ -165,15 +167,15 @@ def fetch_object_for_media_filename(filename):
         app.logger.info(
             "MediaManager matched filename %s via unique stem fallback to %s",
             filename,
-            stem_matches[0].id,
+            stem_matches[0].value,
         )
-        return fetch_object_for_identifier(stem_matches[0].id)
+        return fetch_object_for_identifier(stem_matches[0].value)
 
     app.logger.warning(
         "MediaManager could not match filename %s. Candidates tried=%s stem_matches=%s",
         filename,
         candidates,
-        [match.id for match in stem_matches],
+        [match.value for match in stem_matches],
     )
     abort(404)
 
@@ -181,7 +183,7 @@ def get_identifier_by_shortcode(obj, shortcode):
     return next((i for i in obj.identifiers if i.type.shortcode == shortcode), None)
 
 def get_cantaloupe_base_url(cant_identifier):
-    cant_url = construct_url(cant_identifier.type.url_construct, cant_identifier.id)
+    cant_url = construct_url(cant_identifier.type.url_construct, cant_identifier.value)
     if not cant_url:
         abort(404)
     return cant_url.rsplit("/", 4)[0]
@@ -223,7 +225,7 @@ def redirect_luna_identifier_to_arch(identifier):
     if not arch_ident:
         abort(404)
 
-    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
+    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.value)
     return redirect(arch_url, code=302)
 
 def extract_luna_identifier_from_target(target_url):
@@ -297,7 +299,7 @@ def view_object(user_uuid):
             {
                 "shortcode": ident.type.shortcode,
                 "description": ident.type.description,
-                "identifier": ident.id
+                "identifier": ident.value
             }
             for ident in obj.identifiers
         ]
@@ -305,13 +307,13 @@ def view_object(user_uuid):
 
 @app.route('/identifier/<identifier>')
 def view_identifier(identifier):
-    obj = Identifier.query.get_or_404(identifier)
+    obj = Identifier.query.filter_by(value=identifier).first_or_404()
     return jsonify({
-        "identifier": obj.id,
+        "identifier": obj.value,
         "type": obj.type.description,
         "eric_uuid": str(obj.object.uuid),
         "eric_url": url_for('view_object', uuid=obj.object.uuid, _external=True),
-        "url": construct_url(obj.type.url_construct, obj.id),
+        "url": construct_url(obj.type.url_construct, obj.value),
     })
 
 # ------------------------------------------------------------
@@ -319,7 +321,7 @@ def view_identifier(identifier):
 # ------------------------------------------------------------
 @app.route("/lookup/<path:identifier_value>")
 def lookup(identifier_value):
-    ident = Identifier.query.filter_by(id=identifier_value).first()
+    ident = Identifier.query.filter_by(value=identifier_value).first()
     if not ident:
         return jsonify({"error": "Identifier not found"}), 404
 
@@ -335,18 +337,18 @@ def lookup(identifier_value):
     all_ids = {}
     html_rows = []
     for i in obj.identifiers:
-        url = construct_url(i.type.url_construct, i.id) or i.id
+        url = construct_url(i.type.url_construct, i.value) or i.value
         all_ids[i.type.shortcode] = url
         html_rows.append(
             f"<tr><td>{escape(i.type.shortcode)}</td>"
-            f"<td><a href='{escape(url)}'>{escape(i.id)}</a></td></tr>"
+            f"<td><a href='{escape(url)}'>{escape(i.value)}</a></td></tr>"
         )
 
     # Default redirect → ARCH record
     if request.args.get("format") is None:
         arch_ident = next((i for i in obj.identifiers if i.type.shortcode == "arch"), None)
         if arch_ident:
-            arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
+            arch_url = construct_url(arch_ident.type.url_construct, arch_ident.value)
             return redirect(arch_url, code=302)
 
     if request.args.get("format") == "html":
@@ -478,7 +480,7 @@ def media_manager():
         app.logger.warning(
             "MediaManager found object_id=%s for filename=%s but no cantaloupe identifier is present",
             obj.id,
-            matched_ident.id if matched_ident else filename,
+            matched_ident.value if matched_ident else filename,
         )
         abort(404)
 
@@ -495,7 +497,7 @@ def media_manager():
     else:
         app.logger.warning(
             "Falling back to bounded IIIF size for %s because no stored dimensions were found",
-            cant_ident.id,
+            cant_ident.value,
         )
         size_param = f"!{pixels},{pixels}"
 
@@ -505,9 +507,9 @@ def media_manager():
     app.logger.info(
         "MediaManager redirecting filename=%s matched_file=%s object_id=%s cantaloupe=%s final_url=%s",
         filename,
-        matched_ident.id if matched_ident else None,
+        matched_ident.value if matched_ident else None,
         obj.id,
-        cant_ident.id,
+        cant_ident.value,
         final_url,
     )
 
@@ -535,7 +537,7 @@ def resolve_ark(naan, suffix):
 
     full_ark = f"ark:/{naan}/{suffix}"
 
-    ident = Identifier.query.filter_by(id=full_ark).first()
+    ident = Identifier.query.filter_by(value=full_ark).first()
     if not ident:
         abort(404)
 
@@ -555,10 +557,10 @@ def resolve_ark(naan, suffix):
     if fmt == "html":
         html_rows = []
         for i in obj.identifiers:
-            url = construct_url(i.type.url_construct, i.id) or i.id
+            url = construct_url(i.type.url_construct, i.value) or i.value
             html_rows.append(
                 f"<tr><td>{escape(i.type.shortcode)}</td>"
-                f"<td><a href='{escape(url)}'>{escape(i.id)}</a></td></tr>"
+                f"<td><a href='{escape(url)}'>{escape(i.value)}</a></td></tr>"
             )
 
         html = f"""
@@ -590,7 +592,7 @@ def resolve_ark(naan, suffix):
     elif fmt == "json":
         all_ids = {}
         for i in obj.identifiers:
-            url = construct_url(i.type.url_construct, i.id) or i.id
+            url = construct_url(i.type.url_construct, i.value) or i.value
             all_ids[i.type.shortcode] = url
 
         return jsonify({
@@ -610,7 +612,7 @@ def resolve_ark(naan, suffix):
             "policy": "This ARK is maintained by University of Edinburgh Digital Collections.",
             "target": construct_url(
                 next((i.type.url_construct for i in obj.identifiers if i.type.shortcode=="arch"), None),
-                next((i.id for i in obj.identifiers if i.type.shortcode=="arch"), None)
+                next((i.value for i in obj.identifiers if i.type.shortcode=="arch"), None)
             )
         }
         return jsonify(info)
@@ -620,7 +622,7 @@ def resolve_ark(naan, suffix):
     if not arch_ident:
         abort(404)
 
-    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.id)
+    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.value)
     return redirect(arch_url, code=302)
 
 # ------------------------------------------------------------

@@ -1,7 +1,10 @@
 import sqlite3
 
+import bootstrap
+from project_paths import ERIC_DB
+
 # Connect to your database
-conn = sqlite3.connect('test.db')
+conn = sqlite3.connect(ERIC_DB)
 cursor = conn.cursor()
 
 # List tables

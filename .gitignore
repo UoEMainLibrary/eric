@@ -130,3 +130,12 @@ dmypy.json
 
 #App config
 config.py
+
+# Local IDE/project noise
+.idea/
+
+# Generated runtime artifacts
+data/logs/
+data/output/get_data_checkpoint.json
+data/output/missing_luna_records.csv
+data/db/*.db

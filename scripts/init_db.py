@@ -1,3 +1,4 @@
+import bootstrap
 from app import app, db, IdentifierType, ObjectType
 
 def init_identifier_types():
@@ -53,4 +54,3 @@ if __name__ == "__main__":
         init_object_types()
 
         print("Database initialization complete.")
-
