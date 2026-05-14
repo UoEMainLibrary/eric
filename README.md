@@ -21,5 +21,7 @@ Project layout:
 Useful commands:
 - `python3 scripts/init_db.py` creates the current schema and seed rows.
 - `python3 scripts/get_data.py --resume` crawls `dams-live2` oldest-first and resumes from the last completed source page using `data/output/get_data_checkpoint.json`.
+- `python3 scripts/get_data.py --clear-csvs --resume` clears the generated export CSVs but keeps the crawl checkpoint, so the next batch starts where the previous crawl left off.
+- `python3 scripts/get_data.py --fresh` clears the generated export CSVs and checkpoint before starting a new crawl from the beginning.
 - `python3 scripts/ingest_csv.py` is safe to rerun; it reuses existing objects and only fills in missing identifiers, dimensions, and ARKs.
 - `python3 scripts/ingest_luna_routes.py` loads the generated TinyURL route CSV into the database.

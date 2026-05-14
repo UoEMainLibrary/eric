@@ -81,6 +81,31 @@ def save_checkpoint(path, payload):
         json.dump(payload, handle)
 
 
+def remove_file_if_exists(path, verbose=True):
+    if path and os.path.exists(path):
+        os.remove(path)
+        log(f"Removed existing file: {path}", verbose)
+
+
+def reset_output_files(checkpoint_path, verbose=True):
+    for path in (
+        RECENT_ITEMS_CSV,
+        RECENT_TINYURLS_CSV,
+        MISSING_LUNA_CSV,
+        checkpoint_path,
+    ):
+        remove_file_if_exists(path, verbose=verbose)
+
+
+def clear_output_csvs(verbose=True):
+    for path in (
+        RECENT_ITEMS_CSV,
+        RECENT_TINYURLS_CSV,
+        MISSING_LUNA_CSV,
+    ):
+        remove_file_if_exists(path, verbose=verbose)
+
+
 def load_crawl_checkpoint(checkpoint_path, page_limit, resume):
     checkpoint = load_checkpoint(checkpoint_path) if resume else None
     page_offset = 0
@@ -537,6 +562,16 @@ def parse_args():
         default=CHECKPOINT_JSON,
         help="Path to the JSON checkpoint file used for resumable runs.",
     )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Delete generated CSV outputs and the crawl checkpoint before starting.",
+    )
+    parser.add_argument(
+        "--clear-csvs",
+        action="store_true",
+        help="Delete generated CSV outputs but keep the crawl checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -545,11 +580,17 @@ def main():
     verbose = not args.quiet
     cantaloupe_debug_dumped = False
     ensure_project_dirs()
+    if args.fresh and args.clear_csvs:
+        raise SystemExit("Use either --fresh or --clear-csvs, not both.")
+    if args.fresh:
+        reset_output_files(args.checkpoint, verbose=verbose)
+    elif args.clear_csvs:
+        clear_output_csvs(verbose=verbose)
     session = build_session()
     page_offset, page_number = load_crawl_checkpoint(
         args.checkpoint,
         args.page_limit,
-        args.resume,
+        args.resume and not args.fresh,
     )
     if args.resume and (page_offset or page_number):
         log(
