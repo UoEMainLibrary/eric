@@ -7,7 +7,7 @@
 from flask import Flask, jsonify, request, redirect, url_for, make_response, abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_uuid import FlaskUUID
-from sqlalchemy import func, inspect
+from sqlalchemy import func
 from sqlalchemy_utils import UUIDType
 from sqlalchemy.orm import joinedload
 from markupsafe import escape
@@ -16,6 +16,7 @@ import re
 import uuid
 
 app = Flask(__name__)
+app.url_map.strict_slashes = False
 
 # ------------------------------------------------------------
 # DATABASE CONFIGURATION (MySQL)
@@ -50,13 +51,6 @@ class Identifier(db.Model):
     type_id = db.Column(db.Integer, db.ForeignKey('identifier_type.id'), nullable=False)
     type = db.relationship('IdentifierType', lazy=False, backref=db.backref('identifiers', lazy=True))
 
-class ImageDimensions(db.Model):
-    __tablename__ = "image_dimensions"
-    id = db.Column(db.Integer, primary_key=True)
-    object_id = db.Column(db.Integer, db.ForeignKey('object.id'), nullable=False, unique=True, index=True)
-    width = db.Column(db.Integer, nullable=False)
-    height = db.Column(db.Integer, nullable=False)
-
 class IdentifierType(db.Model):
     __tablename__ = 'identifier_type'
     id = db.Column(db.Integer, primary_key=True)
@@ -76,7 +70,7 @@ class LunaRoute(db.Model):
 # ------------------------------------------------------------
 NAAN = "83794"
 LUNA_IDENTIFIER_RE = re.compile(r"\b[A-Za-z0-9]+~\d+~\d+~\d+~\d+\b")
-_image_dimensions_table_exists = None
+BROWSER_SAFE_LONG_SIDE_PIXELS = 1536
 
 def mint_ark():
     suffix = str(uuid.uuid4())
@@ -90,7 +84,11 @@ def construct_url(url_format, id):
         return url_format.replace("<id>", id)
     return None
 
+def normalise_identifier_value(identifier):
+    return (identifier or "").strip().rstrip("/")
+
 def fetch_object_for_identifier(identifier):
+    identifier = normalise_identifier_value(identifier)
     ident = Identifier.query.filter_by(value=identifier).first()
     if not ident:
         abort(404)
@@ -188,37 +186,25 @@ def get_cantaloupe_base_url(cant_identifier):
         abort(404)
     return cant_url.rsplit("/", 4)[0]
 
-def build_long_side_size_param(width, height, pixels):
-    if width >= height:
-        return f"{pixels},"
-    return f",{pixels}"
+def normalise_iiif_size_request(iiif_params, object_id):
+    parts = iiif_params.split("/", 3)
+    if len(parts) < 4:
+        return iiif_params
 
-def image_dimensions_table_exists():
-    global _image_dimensions_table_exists
-    if _image_dimensions_table_exists is None:
-        _image_dimensions_table_exists = inspect(db.engine).has_table("image_dimensions")
-    return _image_dimensions_table_exists
+    region, size, rotation, remainder = parts
+    if region != "full" or size != "full":
+        return iiif_params
 
-def fetch_object_dimensions(object_id):
-    if not image_dimensions_table_exists():
-        app.logger.warning(
-            "ImageDimensions table is missing; cannot look up stored dimensions for object_id=%s",
-            object_id,
-        )
-        return None, None
-
-    dims = ImageDimensions.query.filter_by(object_id=object_id).first()
-    if not dims:
-        app.logger.info(
-            "No stored image dimensions found for object_id=%s",
-            object_id,
-        )
-        return None, None
-
-    return dims.width, dims.height
+    safe_size = f"!{BROWSER_SAFE_LONG_SIDE_PIXELS},{BROWSER_SAFE_LONG_SIDE_PIXELS}"
+    app.logger.info(
+        "Rewriting IIIF full/full request for object_id=%s to bounded browser-safe size %s",
+        object_id,
+        safe_size,
+    )
+    return f"{region}/{safe_size}/{rotation}/{remainder}"
 
 def redirect_luna_identifier_to_arch(identifier):
-    identifier = identifier.split(":", 1)[0]
+    identifier = normalise_identifier_value(identifier).split(":", 1)[0]
     _, obj = fetch_object_for_identifier(identifier)
 
     arch_ident = get_identifier_by_shortcode(obj, "arch")
@@ -307,6 +293,7 @@ def view_object(user_uuid):
 
 @app.route('/identifier/<identifier>')
 def view_identifier(identifier):
+    identifier = normalise_identifier_value(identifier)
     obj = Identifier.query.filter_by(value=identifier).first_or_404()
     return jsonify({
         "identifier": obj.value,
@@ -321,6 +308,7 @@ def view_identifier(identifier):
 # ------------------------------------------------------------
 @app.route("/lookup/<path:identifier_value>")
 def lookup(identifier_value):
+    identifier_value = normalise_identifier_value(identifier_value)
     ident = Identifier.query.filter_by(value=identifier_value).first()
     if not ident:
         return jsonify({"error": "Identifier not found"}), 404
@@ -399,6 +387,7 @@ def luna_widget_detail(identifier):
 # ------------------------------------------------------------
 @app.route("/luna/servlet/iiif/<identifier>/<path:iiif_params>")
 def luna_iiif(identifier, iiif_params):
+    identifier = normalise_identifier_value(identifier)
     _, obj = fetch_object_for_identifier(identifier)
 
     cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
@@ -406,8 +395,8 @@ def luna_iiif(identifier, iiif_params):
         abort(404)
 
     cant_url = get_cantaloupe_base_url(cant_ident)
-
-    final_url = f"{cant_url}/{iiif_params}"
+    rewritten_params = normalise_iiif_size_request(iiif_params, obj.id)
+    final_url = f"{cant_url}/{rewritten_params}"
     return redirect(final_url, code=302)
 
 # ------------------------------------------------------------
@@ -484,22 +473,13 @@ def media_manager():
         )
         abort(404)
 
-    width, height = fetch_object_dimensions(obj.id)
-    if width is not None and height is not None:
-        size_param = build_long_side_size_param(width, height, pixels)
-        app.logger.info(
-            "MediaManager using stored dimensions for object_id=%s: width=%s height=%s size_param=%s",
-            obj.id,
-            width,
-            height,
-            size_param,
-        )
-    else:
-        app.logger.warning(
-            "Falling back to bounded IIIF size for %s because no stored dimensions were found",
-            cant_ident.value,
-        )
-        size_param = f"!{pixels},{pixels}"
+    size_param = f"!{pixels},{pixels}"
+    app.logger.info(
+        "MediaManager using bounded IIIF size for object_id=%s cantaloupe=%s size_param=%s",
+        obj.id,
+        cant_ident.value,
+        size_param,
+    )
 
     final_url = (
         f"{get_cantaloupe_base_url(cant_ident)}/full/{size_param}/0/default.jpg"

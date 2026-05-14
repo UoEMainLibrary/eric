@@ -389,41 +389,6 @@ def iter_string_values(value):
             yield from iter_string_values(nested)
 
 
-def coerce_int(value):
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isdigit():
-            return int(stripped)
-    return None
-
-
-def extract_dimensions_from_value(value):
-    if isinstance(value, dict):
-        width = coerce_int(value.get("width"))
-        height = coerce_int(value.get("height"))
-        if width and height:
-            return width, height
-
-        for nested in value.values():
-            dimensions = extract_dimensions_from_value(nested)
-            if dimensions:
-                return dimensions
-
-    elif isinstance(value, list):
-        for nested in value:
-            dimensions = extract_dimensions_from_value(nested)
-            if dimensions:
-                return dimensions
-
-    return None
-
-
 def normalise_cantaloupe_candidate(candidate):
     candidate = candidate.strip()
     encoded_match = CANTALOUPE_ID_PATTERN.search(candidate)
@@ -465,30 +430,6 @@ def extract_cantaloupe_identifier_from_image(image_data, filename):
 
     return None
 
-
-def fetch_iiif_dimensions(session, info_url, cache, verbose=True):
-    info_url = unescape(info_url)
-    if info_url in cache:
-        return cache[info_url]
-
-    log(f"  Fetching IIIF info.json {info_url}...", verbose)
-    response = session.get(
-        info_url,
-        headers={"Accept": "application/json"},
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-
-    payload = response.json()
-    width = coerce_int(payload.get("width"))
-    height = coerce_int(payload.get("height"))
-    if not width or not height:
-        raise ValueError(f"Missing width/height in IIIF info.json: {info_url}")
-
-    cache[info_url] = (width, height)
-    return cache[info_url]
-
-
 def fetch_cantaloupe_data(session, arch_uuid, cache, verbose=True):
     if arch_uuid in cache:
         return cache[arch_uuid]
@@ -507,7 +448,6 @@ def fetch_cantaloupe_data(session, arch_uuid, cache, verbose=True):
             continue
         mapping[f"{filename_match.group(1)}.tif"] = {
             "cantaloupe": cantaloupe_id,
-            "info_url": info_url,
         }
 
     cache[arch_uuid] = mapping
@@ -705,7 +645,6 @@ def main():
 
     luna_cache = {}
     cantaloupe_cache = {}
-    iiif_info_cache = {}
     existing_recent_rows = load_existing_recent_rows() if args.resume else {}
     missing_image_keys = load_missing_image_keys() if args.resume else set()
     existing_tinyurl_map = load_existing_tinyurl_map() if args.resume else defaultdict(set)
@@ -808,20 +747,6 @@ def main():
                         print(json.dumps(img, indent=2, sort_keys=True)[:4000], flush=True)
                         cantaloupe_debug_dumped = True
 
-                dimensions = extract_dimensions_from_value(img)
-                if not dimensions and mapped_cantaloupe.get("info_url"):
-                    try:
-                        dimensions = fetch_iiif_dimensions(
-                            session,
-                            mapped_cantaloupe["info_url"],
-                            iiif_info_cache,
-                            verbose=verbose,
-                        )
-                    except Exception as exc:
-                        print(f"Warning: Could not fetch IIIF dimensions for {filename}: {exc}")
-
-                width, height = dimensions or ("", "")
-
                 if not luna_identifier:
                     attempted_query_text = " | ".join(unique_nonempty(attempted_queries))
                     print(
@@ -836,8 +761,8 @@ def main():
                                 "arch": arch_uuid,
                                 "file": filename,
                                 "cantaloupe": cantaloupe_identifier or "",
-                                "width": width,
-                                "height": height,
+                                "width": "",
+                                "height": "",
                             }
                         )
                         recent_handle.flush()
@@ -847,8 +772,8 @@ def main():
                             "arch": arch_uuid,
                             "file": filename,
                             "cantaloupe": cantaloupe_identifier or "",
-                            "width": width,
-                            "height": height,
+                            "width": "",
+                            "height": "",
                         }
                         recent_written += 1
                     if image_key not in missing_image_keys:
@@ -872,8 +797,8 @@ def main():
                             "arch": arch_uuid,
                             "file": filename,
                             "cantaloupe": cantaloupe_identifier or "",
-                            "width": width,
-                            "height": height,
+                            "width": "",
+                            "height": "",
                         }
                     )
                     recent_handle.flush()
@@ -883,8 +808,8 @@ def main():
                         "arch": arch_uuid,
                         "file": filename,
                         "cantaloupe": cantaloupe_identifier or "",
-                        "width": width,
-                        "height": height,
+                        "width": "",
+                        "height": "",
                     }
                     recent_written += 1
 

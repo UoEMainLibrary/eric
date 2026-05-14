@@ -2,22 +2,8 @@ import csv
 import uuid
 
 import bootstrap
-from app import app, db, Identifier, IdentifierType, ImageDimensions, Object, ObjectType, mint_ark
+from app import app, db, Identifier, IdentifierType, Object, ObjectType, mint_ark
 from project_paths import RECENT_ITEMS_CSV
-
-
-def parse_optional_int(value):
-    if value is None:
-        return None
-
-    value = str(value).strip()
-    if not value:
-        return None
-
-    try:
-        return int(value)
-    except ValueError:
-        return None
 
 
 def normalise_identifier_value(value):
@@ -76,28 +62,6 @@ def ensure_identifier(obj, id_type, value):
     )
     return True
 
-
-def ensure_dimensions(obj, width, height):
-    if width is None or height is None:
-        return False
-
-    existing = ImageDimensions.query.filter_by(object_id=obj.id).first()
-    if existing:
-        if existing.width != width or existing.height != height:
-            existing.width = width
-            existing.height = height
-            return True
-        return False
-
-    db.session.add(
-        ImageDimensions(
-            object_id=obj.id,
-            width=width,
-            height=height,
-        )
-    )
-    return True
-
 def main():
     with app.app_context():
         identifier_types = {
@@ -109,7 +73,6 @@ def main():
         inserted_objects = 0
         reused_objects = 0
         inserted_identifiers = 0
-        updated_dimensions = 0
         inserted_arks = 0
         skipped_rows = 0
 
@@ -141,11 +104,6 @@ def main():
                 desired_primary_id = preferred_primary_id(row)
                 if desired_primary_id and obj.primary_id != desired_primary_id:
                     obj.primary_id = desired_primary_id
-
-                width = parse_optional_int(row.get("width"))
-                height = parse_optional_int(row.get("height"))
-                if ensure_dimensions(obj, width, height):
-                    updated_dimensions += 1
 
                 # 3. Insert identifiers for this object
                 ids_to_add = {
@@ -193,7 +151,7 @@ def main():
             print(
                 "CSV ingestion complete! "
                 f"inserted_objects={inserted_objects} reused_objects={reused_objects} "
-                f"inserted_identifiers={inserted_identifiers} updated_dimensions={updated_dimensions} "
+                f"inserted_identifiers={inserted_identifiers} "
                 f"inserted_arks={inserted_arks} skipped_rows={skipped_rows}"
             )
 
