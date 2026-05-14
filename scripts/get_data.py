@@ -1,6 +1,5 @@
 import argparse
 import csv
-import heapq
 import json
 import os
 import re
@@ -23,6 +22,7 @@ from project_paths import (
 JSON_API_BASE_URL = "http://lac-dams-live2.is.ed.ac.uk/jsonapi/node/digital_object"
 ARCH_RECORD_BASE_URL = "https://digital.collections.ed.ac.uk/do"
 LUNA_FETCH_URL = "https://images.is.ed.ac.uk/luna/servlet/as/fetchMediaSearch"
+JSON_API_SORT = "created"
 
 API_HEADERS = {"Accept": "application/vnd.api+json"}
 LUNA_HEADERS = {
@@ -34,7 +34,6 @@ LUNA_HEADERS = {
     "Accept": "application/json,text/javascript,*/*;q=0.1",
     "Referer": "https://images.is.ed.ac.uk/",
 }
-TOP_N = 1000
 PAGE_LIMIT = 50
 REQUEST_TIMEOUT = 30
 
@@ -82,155 +81,72 @@ def save_checkpoint(path, payload):
         json.dump(payload, handle)
 
 
-def serialise_top_objects(top_objects):
-    return [
-        {
-            "image_count": image_count,
-            "arch": arch_uuid,
-            "metadata": metadata,
-        }
-        for image_count, arch_uuid, metadata in top_objects
-    ]
-
-
-def deserialise_top_objects(rows):
-    return [
-        (row["image_count"], row["arch"], row["metadata"])
-        for row in rows
-    ]
-
-
-def fetch_recent_objects(
-    session,
-    top_n=TOP_N,
-    page_limit=PAGE_LIMIT,
-    max_pages=None,
-    checkpoint_path=None,
-    resume=False,
-    verbose=True,
-):
+def load_crawl_checkpoint(checkpoint_path, page_limit, resume):
     checkpoint = load_checkpoint(checkpoint_path) if resume else None
-    top_objects = []
     page_offset = 0
     page_number = 0
 
     if checkpoint:
-        saved_top_n = checkpoint.get("top_n")
         saved_page_limit = checkpoint.get("page_limit")
-        saved_stage = checkpoint.get("stage")
-        if (
-            saved_top_n == top_n
-            and saved_page_limit == page_limit
-            and checkpoint.get("top_objects")
-        ):
-            top_objects = deserialise_top_objects(checkpoint["top_objects"])
-            if saved_stage == "fetch":
-                page_offset = checkpoint.get("page_offset", 0)
-                page_number = checkpoint.get("page_number", 0)
-                heapq.heapify(top_objects)
-                log(
-                    f"Resuming JSON:API scan from checkpoint at page {page_number + 1} "
-                    f"(offset={page_offset}).",
-                    verbose,
-                )
-            elif saved_stage == "enrich":
-                top_objects.sort(reverse=True)
-                log(
-                    f"Loaded {len(top_objects)} queued object(s) from checkpoint for enrichment.",
-                    verbose,
-                )
-                return top_objects
-            elif saved_stage == "complete":
-                top_objects.sort(reverse=True)
-                log(
-                    f"Loaded {len(top_objects)} completed object(s) from checkpoint; "
-                    f"resume mode will skip any rows already written to disk.",
-                    verbose,
-                )
-                return top_objects
+        if saved_page_limit == page_limit:
+            page_offset = checkpoint.get("page_offset", 0)
+            page_number = checkpoint.get("page_number", 0)
 
-    while True:
-        if max_pages is not None and page_number >= max_pages:
-            log(f"Stopping early after {page_number} page(s) due to --max-pages.", verbose)
-            break
+    return page_offset, page_number
 
-        log(
-            f"Fetching JSON:API page {page_number + 1} "
-            f"(offset={page_offset}, limit={page_limit})...",
-            verbose,
-        )
-        url = (
-            f"{JSON_API_BASE_URL}"
-            f"?fields[node--digital_object]=field_descriptive_metadata"
-            f"&page[limit]={page_limit}"
-            f"&page[offset]={page_offset}"
-        )
 
-        response = session.get(url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
-
-        objects = payload.get("data", [])
-        if not objects:
-            break
-
-        for obj in objects:
-            node_uuid = obj["id"]
-            field_value = (
-                obj["attributes"]
-                .get("field_descriptive_metadata", {})
-                .get("value")
-            )
-            if not field_value:
-                continue
-
-            try:
-                metadata = json.loads(field_value)
-            except json.JSONDecodeError:
-                print(f"Warning: Could not parse JSON for node {node_uuid}")
-                continue
-
-            image_count = metadata.get("images")
-            if image_count is None:
-                continue
-
-            heapq.heappush(top_objects, (image_count, node_uuid, metadata))
-            if len(top_objects) > top_n:
-                heapq.heappop(top_objects)
-
-        log(
-            f"Fetched {len(objects)} object(s); heap currently holds {len(top_objects)} top record(s).",
-            verbose,
-        )
-
-        page_offset += page_limit
-        page_number += 1
-        save_checkpoint(
-            checkpoint_path,
-            {
-                "stage": "fetch",
-                "page_offset": page_offset,
-                "page_number": page_number,
-                "page_limit": page_limit,
-                "top_n": top_n,
-                "top_objects": serialise_top_objects(top_objects),
-            },
-        )
-
-    top_objects.sort(reverse=True)
-    save_checkpoint(
-        checkpoint_path,
-        {
-            "stage": "enrich",
-            "page_offset": page_offset,
-            "page_number": page_number,
-            "page_limit": page_limit,
-            "top_n": top_n,
-            "top_objects": serialise_top_objects(top_objects),
-        },
+def fetch_source_page(session, page_offset, page_limit, verbose=True):
+    log(
+        f"Fetching JSON:API page at offset={page_offset}, limit={page_limit}, sort={JSON_API_SORT}...",
+        verbose,
     )
-    log(f"Collected {len(top_objects)} top object(s) for enrichment.", verbose)
-    return top_objects
+    url = (
+        f"{JSON_API_BASE_URL}"
+        f"?fields[node--digital_object]=field_descriptive_metadata,created"
+        f"&sort={JSON_API_SORT}"
+        f"&page[limit]={page_limit}"
+        f"&page[offset]={page_offset}"
+    )
+
+    response = session.get(url, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    payload = response.json()
+    objects = payload.get("data", [])
+    page_rows = []
+
+    for obj in objects:
+        node_uuid = obj["id"]
+        created = (
+            obj.get("attributes", {})
+            .get("created")
+        )
+        field_value = (
+            obj["attributes"]
+            .get("field_descriptive_metadata", {})
+            .get("value")
+        )
+        if not field_value:
+            continue
+
+        try:
+            metadata = json.loads(field_value)
+        except json.JSONDecodeError:
+            print(f"Warning: Could not parse JSON for node {node_uuid}")
+            continue
+
+        page_rows.append(
+            {
+                "arch": node_uuid,
+                "metadata": metadata,
+                "created": created,
+            }
+        )
+
+    log(
+        f"Fetched {len(objects)} object(s); {len(page_rows)} object(s) had usable metadata.",
+        verbose,
+    )
+    return objects, page_rows
 
 
 def normalise_filename(filename):
@@ -594,7 +510,6 @@ def open_csv_writer(path, fieldnames, resume=False):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Build ERIC ingest and routing CSVs.")
-    parser.add_argument("--top-n", type=int, default=TOP_N, help="Number of top objects to enrich.")
     parser.add_argument("--page-limit", type=int, default=PAGE_LIMIT, help="JSON:API page size.")
     parser.add_argument(
         "--max-pages",
@@ -631,15 +546,17 @@ def main():
     cantaloupe_debug_dumped = False
     ensure_project_dirs()
     session = build_session()
-    top_objects = fetch_recent_objects(
-        session,
-        top_n=args.top_n,
-        page_limit=args.page_limit,
-        max_pages=args.max_pages,
-        checkpoint_path=args.checkpoint,
-        resume=args.resume,
-        verbose=verbose,
+    page_offset, page_number = load_crawl_checkpoint(
+        args.checkpoint,
+        args.page_limit,
+        args.resume,
     )
+    if args.resume and (page_offset or page_number):
+        log(
+            f"Resuming oldest-first crawl from page {page_number + 1} "
+            f"(offset={page_offset}).",
+            verbose,
+        )
     tinyurl_routes = load_tinyurl_routes(TINYURLS_CSV)
     log(f"Loaded TinyURL routes for {len(tinyurl_routes)} LUNA identifier(s).", verbose)
 
@@ -670,47 +587,76 @@ def main():
     )
 
     try:
-        for index, (image_count, arch_uuid, metadata) in enumerate(top_objects, start=1):
-            image_total = len(metadata.get("as:image", {})) if isinstance(metadata.get("as:image", {}), dict) else image_count
-            log(
-                f"Enriching object {index}/{len(top_objects)}: arch={arch_uuid}, images={image_total}",
-                verbose,
-            )
-            images = metadata.get("as:image", {})
-            if not isinstance(images, dict):
-                continue
+        while True:
+            if args.max_pages is not None and page_number >= args.max_pages:
+                log(f"Stopping early after {page_number} page(s) due to --max-pages.", verbose)
+                break
 
-            cantaloupe_data = fetch_cantaloupe_data(
+            raw_objects, source_rows = fetch_source_page(
                 session,
-                arch_uuid,
-                cantaloupe_cache,
+                page_offset,
+                args.page_limit,
                 verbose=verbose,
             )
+            if not raw_objects:
+                save_checkpoint(
+                    args.checkpoint,
+                    {
+                        "stage": "complete",
+                        "page_offset": page_offset,
+                        "page_number": page_number,
+                        "page_limit": args.page_limit,
+                        "sort": JSON_API_SORT,
+                    },
+                )
+                break
 
-            for img in images.values():
-                filename = normalise_filename(img.get("name"))
-                if not filename:
+            if not source_rows:
+                page_offset += args.page_limit
+                page_number += 1
+                save_checkpoint(
+                    args.checkpoint,
+                    {
+                        "stage": "crawl",
+                        "page_offset": page_offset,
+                        "page_number": page_number,
+                        "page_limit": args.page_limit,
+                        "sort": JSON_API_SORT,
+                    },
+                )
+                continue
+
+            for row_index, source_row in enumerate(source_rows, start=1):
+                arch_uuid = source_row["arch"]
+                metadata = source_row["metadata"]
+                created = source_row.get("created") or "unknown"
+                image_total = len(metadata.get("as:image", {})) if isinstance(metadata.get("as:image", {}), dict) else metadata.get("images", 0)
+                log(
+                    f"Enriching source object page={page_number + 1} row={row_index}/{len(source_rows)}: "
+                    f"arch={arch_uuid}, created={created}, images={image_total}",
+                    verbose,
+                )
+                images = metadata.get("as:image", {})
+                if not isinstance(images, dict):
                     continue
 
-                image_key = (arch_uuid, filename)
-                existing_recent_row = existing_recent_rows.get(image_key)
-                existing_luna = normalise_filename(existing_recent_row.get("luna")) if existing_recent_row else ""
-                if existing_recent_row:
-                    if not existing_luna and image_key in missing_image_keys:
-                        skipped_images += 1
-                        log(
-                            f"  Skipping previously processed image {filename} on Archipelago record {arch_uuid}.",
-                            verbose,
-                        )
+                cantaloupe_data = fetch_cantaloupe_data(
+                    session,
+                    arch_uuid,
+                    cantaloupe_cache,
+                    verbose=verbose,
+                )
+
+                for img in images.values():
+                    filename = normalise_filename(img.get("name"))
+                    if not filename:
                         continue
 
-                    if existing_luna:
-                        expected_tokens = {
-                            route["token"]
-                            for route in tinyurl_routes.get(existing_luna, [])
-                        }
-                        existing_tokens = existing_tinyurl_map.get((arch_uuid, filename, existing_luna), set())
-                        if expected_tokens.issubset(existing_tokens):
+                    image_key = (arch_uuid, filename)
+                    existing_recent_row = existing_recent_rows.get(image_key)
+                    existing_luna = normalise_filename(existing_recent_row.get("luna")) if existing_recent_row else ""
+                    if existing_recent_row:
+                        if not existing_luna and image_key in missing_image_keys:
                             skipped_images += 1
                             log(
                                 f"  Skipping previously processed image {filename} on Archipelago record {arch_uuid}.",
@@ -718,46 +664,96 @@ def main():
                             )
                             continue
 
-                try:
-                    luna_identifier, attempted_queries = fetch_luna_identifier(
-                        session,
-                        filename,
-                        luna_cache,
-                        verbose=verbose,
-                    )
-                except Exception as exc:
-                    print(f"Warning: Could not fetch LUNA ID for {filename}: {exc}")
-                    luna_identifier = None
-                    attempted_queries = []
+                        if existing_luna:
+                            expected_tokens = {
+                                route["token"]
+                                for route in tinyurl_routes.get(existing_luna, [])
+                            }
+                            existing_tokens = existing_tinyurl_map.get((arch_uuid, filename, existing_luna), set())
+                            if expected_tokens.issubset(existing_tokens):
+                                skipped_images += 1
+                                log(
+                                    f"  Skipping previously processed image {filename} on Archipelago record {arch_uuid}.",
+                                    verbose,
+                                )
+                                continue
 
-                if not luna_identifier and existing_luna:
-                    luna_identifier = existing_luna
+                    try:
+                        luna_identifier, attempted_queries = fetch_luna_identifier(
+                            session,
+                            filename,
+                            luna_cache,
+                            verbose=verbose,
+                        )
+                    except Exception as exc:
+                        print(f"Warning: Could not fetch LUNA ID for {filename}: {exc}")
+                        luna_identifier = None
+                        attempted_queries = []
 
-                mapped_cantaloupe = cantaloupe_data.get(filename, {})
-                cantaloupe_identifier = extract_cantaloupe_identifier_from_image(img, filename)
-                if not cantaloupe_identifier:
-                    cantaloupe_identifier = mapped_cantaloupe.get("cantaloupe")
-                if not cantaloupe_identifier:
-                    print(
-                        f"Warning: Could not find Cantaloupe ID for {filename} "
-                        f"on Archipelago record {arch_uuid}"
-                    )
-                    if args.debug_cantaloupe and not cantaloupe_debug_dumped:
-                        print("Debug: sample as:image payload follows:", flush=True)
-                        print(json.dumps(img, indent=2, sort_keys=True)[:4000], flush=True)
-                        cantaloupe_debug_dumped = True
+                    if not luna_identifier and existing_luna:
+                        luna_identifier = existing_luna
 
-                if not luna_identifier:
-                    attempted_query_text = " | ".join(unique_nonempty(attempted_queries))
-                    print(
-                        f"Warning: Could not resolve LUNA ID for {filename} "
-                        f"on Archipelago record {arch_uuid}. Tried: {attempted_query_text or 'no queries recorded'}"
-                    )
+                    mapped_cantaloupe = cantaloupe_data.get(filename, {})
+                    cantaloupe_identifier = extract_cantaloupe_identifier_from_image(img, filename)
+                    if not cantaloupe_identifier:
+                        cantaloupe_identifier = mapped_cantaloupe.get("cantaloupe")
+                    if not cantaloupe_identifier:
+                        print(
+                            f"Warning: Could not find Cantaloupe ID for {filename} "
+                            f"on Archipelago record {arch_uuid}"
+                        )
+                        if args.debug_cantaloupe and not cantaloupe_debug_dumped:
+                            print("Debug: sample as:image payload follows:", flush=True)
+                            print(json.dumps(img, indent=2, sort_keys=True)[:4000], flush=True)
+                            cantaloupe_debug_dumped = True
+
+                    if not luna_identifier:
+                        attempted_query_text = " | ".join(unique_nonempty(attempted_queries))
+                        print(
+                            f"Warning: Could not resolve LUNA ID for {filename} "
+                            f"on Archipelago record {arch_uuid}. Tried: {attempted_query_text or 'no queries recorded'}"
+                        )
+                        if not existing_recent_row:
+                            recent_writer.writerow(
+                                {
+                                    "object_type": "Image",
+                                    "luna": "",
+                                    "arch": arch_uuid,
+                                    "file": filename,
+                                    "cantaloupe": cantaloupe_identifier or "",
+                                    "width": "",
+                                    "height": "",
+                                }
+                            )
+                            recent_handle.flush()
+                            existing_recent_rows[image_key] = {
+                                "object_type": "Image",
+                                "luna": "",
+                                "arch": arch_uuid,
+                                "file": filename,
+                                "cantaloupe": cantaloupe_identifier or "",
+                                "width": "",
+                                "height": "",
+                            }
+                            recent_written += 1
+                        if image_key not in missing_image_keys:
+                            missing_writer.writerow(
+                                {
+                                    "arch": arch_uuid,
+                                    "file": filename,
+                                    "attempted_queries": attempted_query_text,
+                                }
+                            )
+                            missing_handle.flush()
+                            missing_image_keys.add(image_key)
+                            missing_luna_written += 1
+                        continue
+
                     if not existing_recent_row:
                         recent_writer.writerow(
                             {
                                 "object_type": "Image",
-                                "luna": "",
+                                "luna": luna_identifier,
                                 "arch": arch_uuid,
                                 "file": filename,
                                 "cantaloupe": cantaloupe_identifier or "",
@@ -768,7 +764,7 @@ def main():
                         recent_handle.flush()
                         existing_recent_rows[image_key] = {
                             "object_type": "Image",
-                            "luna": "",
+                            "luna": luna_identifier,
                             "arch": arch_uuid,
                             "file": filename,
                             "cantaloupe": cantaloupe_identifier or "",
@@ -776,75 +772,42 @@ def main():
                             "height": "",
                         }
                         recent_written += 1
-                    if image_key not in missing_image_keys:
-                        missing_writer.writerow(
+
+                    for route in tinyurl_routes.get(luna_identifier, []):
+                        existing_tokens = existing_tinyurl_map[(arch_uuid, filename, luna_identifier)]
+                        if route["token"] in existing_tokens:
+                            continue
+
+                        tinyurl_writer.writerow(
                             {
-                                "arch": arch_uuid,
                                 "file": filename,
-                                "attempted_queries": attempted_query_text,
+                                "luna": luna_identifier,
+                                "arch": arch_uuid,
+                                "token": route["token"],
+                                "route_type": route["route_type"],
+                                "target_url": route["target_url"],
                             }
                         )
-                        missing_handle.flush()
-                        missing_image_keys.add(image_key)
-                        missing_luna_written += 1
-                    continue
+                        tinyurl_handle.flush()
+                        existing_tokens.add(route["token"])
+                        tinyurl_written += 1
 
-                if not existing_recent_row:
-                    recent_writer.writerow(
-                        {
-                            "object_type": "Image",
-                            "luna": luna_identifier,
-                            "arch": arch_uuid,
-                            "file": filename,
-                            "cantaloupe": cantaloupe_identifier or "",
-                            "width": "",
-                            "height": "",
-                        }
-                    )
-                    recent_handle.flush()
-                    existing_recent_rows[image_key] = {
-                        "object_type": "Image",
-                        "luna": luna_identifier,
-                        "arch": arch_uuid,
-                        "file": filename,
-                        "cantaloupe": cantaloupe_identifier or "",
-                        "width": "",
-                        "height": "",
-                    }
-                    recent_written += 1
-
-                for route in tinyurl_routes.get(luna_identifier, []):
-                    existing_tokens = existing_tinyurl_map[(arch_uuid, filename, luna_identifier)]
-                    if route["token"] in existing_tokens:
-                        continue
-
-                    tinyurl_writer.writerow(
-                        {
-                            "file": filename,
-                            "luna": luna_identifier,
-                            "arch": arch_uuid,
-                            "token": route["token"],
-                            "route_type": route["route_type"],
-                            "target_url": route["target_url"],
-                        }
-                    )
-                    tinyurl_handle.flush()
-                    existing_tokens.add(route["token"])
-                    tinyurl_written += 1
+            page_offset += args.page_limit
+            page_number += 1
+            save_checkpoint(
+                args.checkpoint,
+                {
+                    "stage": "crawl",
+                    "page_offset": page_offset,
+                    "page_number": page_number,
+                    "page_limit": args.page_limit,
+                    "sort": JSON_API_SORT,
+                },
+            )
     finally:
         recent_handle.close()
         tinyurl_handle.close()
         missing_handle.close()
-
-    save_checkpoint(
-        args.checkpoint,
-        {
-            "stage": "complete",
-            "page_limit": args.page_limit,
-            "top_n": args.top_n,
-            "top_objects": serialise_top_objects(top_objects),
-        },
-    )
 
     print(
         f"Done! Wrote {recent_written} new rows to {RECENT_ITEMS_CSV} "
