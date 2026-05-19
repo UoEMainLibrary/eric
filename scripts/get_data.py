@@ -29,6 +29,8 @@ from urllib.parse import unquote
 
 import requests
 import bootstrap
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from project_paths import (
     CHECKPOINT_JSON,
     MISSING_LUNA_CSV,
@@ -56,6 +58,8 @@ LUNA_HEADERS = {
 }
 PAGE_LIMIT = 50
 REQUEST_TIMEOUT = 30
+DEFAULT_HTTP_RETRIES = 5
+DEFAULT_RETRY_BACKOFF = 1.0
 
 LUNA_IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z0-9]+~\d+~\d+~\d+~\d+\b")
 IIIF_INFO_PATTERN = re.compile(r'data-iiif-infojson="([^"]*/iiif/2/([^"]+)/info\.json)"')
@@ -74,9 +78,23 @@ CANTALOUPE_DECODED_PATTERN = re.compile(
 )
 
 
-def build_session():
+def build_session(http_retries=DEFAULT_HTTP_RETRIES, retry_backoff=DEFAULT_RETRY_BACKOFF):
     session = requests.Session()
     session.headers.update(API_HEADERS)
+    retry = Retry(
+        total=http_retries,
+        connect=http_retries,
+        read=http_retries,
+        status=http_retries,
+        backoff_factor=retry_backoff,
+        status_forcelist=(408, 429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     return session
 
 
@@ -660,6 +678,18 @@ def parse_args():
         action="store_true",
         help="Delete generated CSV outputs but keep the crawl checkpoint.",
     )
+    parser.add_argument(
+        "--http-retries",
+        type=int,
+        default=DEFAULT_HTTP_RETRIES,
+        help="Retry count for transient HTTP/network failures on GET requests.",
+    )
+    parser.add_argument(
+        "--retry-backoff",
+        type=float,
+        default=DEFAULT_RETRY_BACKOFF,
+        help="Backoff factor for HTTP retries; larger values wait longer between attempts.",
+    )
     return parser.parse_args()
 
 
@@ -678,7 +708,10 @@ def main():
         reset_output_files(args.checkpoint, verbose=verbose)
     elif args.clear_csvs:
         clear_output_csvs(verbose=verbose)
-    session = build_session()
+    session = build_session(
+        http_retries=args.http_retries,
+        retry_backoff=args.retry_backoff,
+    )
     page_offset, page_number = load_crawl_checkpoint(
         args.checkpoint,
         args.page_limit,
