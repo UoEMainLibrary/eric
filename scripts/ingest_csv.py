@@ -1,5 +1,6 @@
 import csv
 import uuid
+from datetime import datetime, timezone
 
 import bootstrap
 from app import app, db, Identifier, IdentifierType, Object, ObjectType, mint_ark
@@ -12,6 +13,21 @@ def normalise_identifier_value(value):
 
     value = str(value).strip()
     return value or None
+
+
+def parse_source_created_at(value):
+    value = normalise_identifier_value(value)
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def preferred_primary_id(row):
@@ -96,6 +112,7 @@ def main():
                         uuid=uuid.uuid4(),
                         type_id=obj_type.id,
                         primary_id=preferred_primary_id(row),
+                        source_created_at=parse_source_created_at(row.get("source_created_at")),
                     )
                     db.session.add(obj)
                     db.session.flush()
@@ -104,6 +121,10 @@ def main():
                 desired_primary_id = preferred_primary_id(row)
                 if desired_primary_id and obj.primary_id != desired_primary_id:
                     obj.primary_id = desired_primary_id
+
+                source_created_at = parse_source_created_at(row.get("source_created_at"))
+                if source_created_at and obj.source_created_at != source_created_at:
+                    obj.source_created_at = source_created_at
 
                 # 3. Insert identifiers for this object
                 ids_to_add = {

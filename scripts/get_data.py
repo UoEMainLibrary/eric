@@ -1,3 +1,23 @@
+"""
+Harvest image metadata from Archipelago and enrich it with LUNA/Cantaloupe IDs.
+
+This script intentionally keeps two filename forms in play:
+
+1. `source_filename`
+   The original image name from Archipelago metadata. This may include a folder
+   path and may reflect the source-system extension exactly as stored upstream.
+   We use this form when querying LUNA, because LUNA may hold the value as a
+   full Repro Record ID, a leaf filename, or a stem-only Repro Link ID.
+
+2. `file`
+   The canonical ERIC file identifier. This is always the leaf filename only,
+   with the local rule applied that `...c.jpg` really means `...c.tif`, while
+   `...d.jpg` remains `...d.jpg`.
+
+In short: we match LUNA with the richest source filename we have, but we store
+the normalized `file` value we want ERIC to use consistently.
+"""
+
 import argparse
 import csv
 import json
@@ -188,6 +208,33 @@ def filename_leaf(filename):
     return name.rsplit("/", 1)[-1]
 
 
+def filename_marker(filename):
+    stem = filename_stem(filename)
+    marker_match = re.search(r"([cd])(?:-\d+)?$", stem, re.IGNORECASE)
+    return marker_match.group(1).lower() if marker_match else stem[-1:].lower()
+
+
+def canonical_file_identifier(filename):
+    # Store a canonical leaf filename in ERIC, not a source-system path.
+    # LUNA matching still uses the original source filename separately.
+    leaf_name = filename_leaf(filename)
+    stem = filename_stem(leaf_name)
+    extension = ""
+    if "." in leaf_name:
+        extension = leaf_name.rsplit(".", 1)[1].lower()
+
+    tail = filename_marker(leaf_name)
+    if extension in {"jpg", "jpeg"}:
+        if tail == "c":
+            extension = "tif"
+        elif tail == "d":
+            extension = "jpg"
+
+    if extension:
+        return f"{stem}.{extension}"
+    return stem
+
+
 def unique_nonempty(values):
     seen = set()
     ordered = []
@@ -203,18 +250,59 @@ def unique_nonempty(values):
     return ordered
 
 
-def build_luna_query_candidates(filename):
+def build_luna_filename_variants(filename):
     full_name = normalise_filename(filename)
-    leaf_name = filename_leaf(full_name)
-    leaf_stem = filename_stem(leaf_name)
-    full_stem = filename_stem(full_name)
+    if not full_name:
+        return []
 
-    return [
-        ("Repro_Record_ID", full_name),
-        ("Repro_Record_ID", leaf_name),
-        ("Repro_Link_ID", leaf_stem),
-        ("Repro_Link_ID", full_stem),
-    ]
+    variants = [full_name]
+    leaf_name = filename_leaf(full_name)
+    if leaf_name != full_name:
+        variants.append(leaf_name)
+
+    stem = filename_stem(full_name)
+    extension = full_name.rsplit(".", 1)[1].lower() if "." in full_name else ""
+    marker = filename_marker(full_name)
+
+    alternate_extensions = []
+    if extension in {"tif", "tiff"} and marker in {"c", "d"}:
+        alternate_extensions.extend(["jpg", "jpeg"])
+    elif extension in {"jpg", "jpeg"} and marker == "c":
+        alternate_extensions.extend(["tif", "tiff"])
+
+    for alternate_extension in alternate_extensions:
+        alternate_name = f"{stem}.{alternate_extension}"
+        variants.append(alternate_name)
+        alternate_leaf = filename_leaf(alternate_name)
+        if alternate_leaf != alternate_name:
+            variants.append(alternate_leaf)
+
+    return unique_nonempty(variants)
+
+
+def build_luna_query_candidates(filename):
+    query_candidates = []
+    seen = set()
+
+    for candidate_name in build_luna_filename_variants(filename):
+        full_name = normalise_filename(candidate_name)
+        leaf_name = filename_leaf(full_name)
+        leaf_stem = filename_stem(leaf_name)
+        full_stem = filename_stem(full_name)
+
+        for field_name, candidate in (
+            ("Repro_Record_ID", full_name),
+            ("Repro_Record_ID", leaf_name),
+            ("Repro_Link_ID", leaf_stem),
+            ("Repro_Link_ID", full_stem),
+        ):
+            key = (field_name.lower(), candidate.lower())
+            if not candidate or key in seen:
+                continue
+            seen.add(key)
+            query_candidates.append((field_name, candidate))
+
+    return query_candidates
 
 
 def parse_luna_attributes(item):
@@ -231,16 +319,16 @@ def parse_luna_attributes(item):
 
 def luna_item_matches_filename(item, filename):
     attrs = parse_luna_attributes(item)
-    full_name = normalise_filename(filename).lower()
-    leaf_name = filename_leaf(filename).lower()
-    full_stem = filename_stem(filename).lower()
-    leaf_stem = filename_stem(leaf_name).lower()
+    filename_variants = build_luna_filename_variants(filename)
+    names_and_stems = set()
+    for variant in filename_variants:
+        full_name = normalise_filename(variant).lower()
+        leaf_name = filename_leaf(variant).lower()
+        full_stem = filename_stem(variant).lower()
+        leaf_stem = filename_stem(leaf_name).lower()
+        names_and_stems.update({full_name, leaf_name, full_stem, leaf_stem})
 
     candidates = {
-        full_stem,
-        leaf_stem,
-        full_name,
-        leaf_name,
         attrs.get("repro_link_id", "").lower(),
         attrs.get("repro_record_id", "").lower(),
         attrs.get("mediafileName", "").lower(),
@@ -257,7 +345,7 @@ def luna_item_matches_filename(item, filename):
         candidates.add(filename_leaf(repro_record_id).lower())
         candidates.add(filename_stem(repro_record_id).lower())
 
-    return any(candidate in candidates for candidate in (full_name, leaf_name, full_stem, leaf_stem))
+    return any(candidate in candidates for candidate in names_and_stems if candidate)
 
 
 def fetch_luna_identifier(session, filename, cache, verbose=True):
@@ -477,7 +565,7 @@ def load_existing_recent_rows():
         reader = csv.DictReader(handle)
         for row in reader:
             arch = normalise_filename(row.get("arch"))
-            file_name = normalise_filename(row.get("file"))
+            file_name = canonical_file_identifier(row.get("file"))
             if not arch or not file_name:
                 continue
             rows[(arch, file_name)] = row
@@ -489,7 +577,7 @@ def load_missing_image_keys():
         MISSING_LUNA_CSV,
         lambda row: (
             normalise_filename(row.get("arch")),
-            normalise_filename(row.get("file")),
+            canonical_file_identifier(row.get("file")),
         ) if row.get("arch") and row.get("file") else None,
     )
 
@@ -503,7 +591,7 @@ def load_existing_tinyurl_map():
         reader = csv.DictReader(handle)
         for row in reader:
             arch = normalise_filename(row.get("arch"))
-            file_name = normalise_filename(row.get("file"))
+            file_name = canonical_file_identifier(row.get("file"))
             luna = normalise_filename(row.get("luna"))
             token = normalise_filename(row.get("token"))
             if not arch or not file_name or not luna or not token:
@@ -579,6 +667,10 @@ def main():
     args = parse_args()
     verbose = not args.quiet
     cantaloupe_debug_dumped = False
+
+    # 1. Prepare the run state: make sure directories exist, decide whether
+    #    to start fresh, and restore the oldest-first crawl checkpoint if we
+    #    are resuming a previous run.
     ensure_project_dirs()
     if args.fresh and args.clear_csvs:
         raise SystemExit("Use either --fresh or --clear-csvs, not both.")
@@ -598,6 +690,9 @@ def main():
             f"(offset={page_offset}).",
             verbose,
         )
+    # 2. Load the lookup material that lets us skip work safely on resume:
+    #    known tinyurl routes, recent CSV rows already written, and images
+    #    previously recorded as missing a LUNA match.
     tinyurl_routes = load_tinyurl_routes(TINYURLS_CSV)
     log(f"Loaded TinyURL routes for {len(tinyurl_routes)} LUNA identifier(s).", verbose)
 
@@ -613,7 +708,7 @@ def main():
 
     recent_handle, recent_writer = open_csv_writer(
         RECENT_ITEMS_CSV,
-        ["object_type", "luna", "arch", "file", "cantaloupe", "width", "height"],
+        ["object_type", "luna", "arch", "file", "cantaloupe", "source_created_at", "width", "height"],
         resume=args.resume,
     )
     tinyurl_handle, tinyurl_writer = open_csv_writer(
@@ -628,6 +723,8 @@ def main():
     )
 
     try:
+        # 3. Crawl Archipelago JSON:API oldest-first, one source page at a
+        #    time, and checkpoint after each completed page.
         while True:
             if args.max_pages is not None and page_number >= args.max_pages:
                 log(f"Stopping early after {page_number} page(s) due to --max-pages.", verbose)
@@ -667,6 +764,8 @@ def main():
                 )
                 continue
 
+            # 4. For each source object, read the descriptive metadata and
+            #    fetch any Cantaloupe identifiers we can reuse for its images.
             for row_index, source_row in enumerate(source_rows, start=1):
                 arch_uuid = source_row["arch"]
                 metadata = source_row["metadata"]
@@ -688,10 +787,14 @@ def main():
                     verbose=verbose,
                 )
 
+                # 5. Walk each image on the object. We keep two filename forms:
+                #    `source_filename` for LUNA matching, and canonical
+                #    `filename` for the ERIC `file` identifier we store/export.
                 for img in images.values():
-                    filename = normalise_filename(img.get("name"))
-                    if not filename:
+                    source_filename = normalise_filename(img.get("name"))
+                    if not source_filename:
                         continue
+                    filename = canonical_file_identifier(source_filename)
 
                     image_key = (arch_uuid, filename)
                     existing_recent_row = existing_recent_rows.get(image_key)
@@ -720,14 +823,18 @@ def main():
                                 continue
 
                     try:
+                        # 6. Query LUNA using the original source filename, not
+                        #    the canonicalized ERIC `file` value. This gives the
+                        #    matcher the best chance of hitting Repro Record ID
+                        #    or Repro Link ID in whatever shape LUNA stored it.
                         luna_identifier, attempted_queries = fetch_luna_identifier(
                             session,
-                            filename,
+                            source_filename,
                             luna_cache,
                             verbose=verbose,
                         )
                     except Exception as exc:
-                        print(f"Warning: Could not fetch LUNA ID for {filename}: {exc}")
+                        print(f"Warning: Could not fetch LUNA ID for {source_filename}: {exc}")
                         luna_identifier = None
                         attempted_queries = []
 
@@ -735,7 +842,9 @@ def main():
                         luna_identifier = existing_luna
 
                     mapped_cantaloupe = cantaloupe_data.get(filename, {})
-                    cantaloupe_identifier = extract_cantaloupe_identifier_from_image(img, filename)
+                    cantaloupe_identifier = extract_cantaloupe_identifier_from_image(img, source_filename)
+                    if not cantaloupe_identifier and filename != source_filename:
+                        cantaloupe_identifier = extract_cantaloupe_identifier_from_image(img, filename)
                     if not cantaloupe_identifier:
                         cantaloupe_identifier = mapped_cantaloupe.get("cantaloupe")
                     if not cantaloupe_identifier:
@@ -762,6 +871,7 @@ def main():
                                     "arch": arch_uuid,
                                     "file": filename,
                                     "cantaloupe": cantaloupe_identifier or "",
+                                    "source_created_at": created,
                                     "width": "",
                                     "height": "",
                                 }
@@ -773,6 +883,7 @@ def main():
                                 "arch": arch_uuid,
                                 "file": filename,
                                 "cantaloupe": cantaloupe_identifier or "",
+                                "source_created_at": created,
                                 "width": "",
                                 "height": "",
                             }
@@ -790,6 +901,9 @@ def main():
                             missing_luna_written += 1
                         continue
 
+                    # 7. Write the resolved image row, then expand any known
+                    #    tinyurl routes for that LUNA identifier into the
+                    #    companion CSV used by route ingest.
                     if not existing_recent_row:
                         recent_writer.writerow(
                             {
@@ -798,6 +912,7 @@ def main():
                                 "arch": arch_uuid,
                                 "file": filename,
                                 "cantaloupe": cantaloupe_identifier or "",
+                                "source_created_at": created,
                                 "width": "",
                                 "height": "",
                             }
@@ -809,6 +924,7 @@ def main():
                             "arch": arch_uuid,
                             "file": filename,
                             "cantaloupe": cantaloupe_identifier or "",
+                            "source_created_at": created,
                             "width": "",
                             "height": "",
                         }
@@ -833,6 +949,8 @@ def main():
                         existing_tokens.add(route["token"])
                         tinyurl_written += 1
 
+            # 8. Only advance the crawl checkpoint after the full source page
+            #    has been processed, so resume restarts cleanly at page level.
             page_offset += args.page_limit
             page_number += 1
             save_checkpoint(
@@ -856,11 +974,11 @@ def main():
     )
     print(
         f"Done! Wrote {tinyurl_written} new rows to {RECENT_TINYURLS_CSV} "
-        f"(total rows now {count_csv_rows(RECENT_TINYURLS_CSV)})"
+        f"(total rows now {count_csv_rows(RECENT_TINYURLS_CSV)}; skipped existing {skipped_images})"
     )
     print(
         f"Done! Wrote {missing_luna_written} new rows to {MISSING_LUNA_CSV} "
-        f"(total rows now {count_csv_rows(MISSING_LUNA_CSV)})"
+        f"(total rows now {count_csv_rows(MISSING_LUNA_CSV)}; skipped existing {skipped_images})"
     )
 
 

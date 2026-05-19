@@ -12,6 +12,7 @@ from sqlalchemy_utils import UUIDType
 from sqlalchemy.orm import joinedload
 from markupsafe import escape
 from urllib.parse import unquote, urlparse
+from datetime import datetime
 import re
 import uuid
 
@@ -36,6 +37,9 @@ class Object(db.Model):
     type_id = db.Column(db.Integer, db.ForeignKey('object_type.id'), nullable=False)
     type = db.relationship('ObjectType', lazy=False, backref=db.backref('objects', lazy=True))
     primary_id = db.Column(db.String(64))
+    source_created_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 class ObjectType(db.Model):
     __tablename__ = 'object_type'
@@ -50,6 +54,8 @@ class Identifier(db.Model):
     object = db.relationship('Object', backref=db.backref('identifiers', lazy=True))
     type_id = db.Column(db.Integer, db.ForeignKey('identifier_type.id'), nullable=False)
     type = db.relationship('IdentifierType', lazy=False, backref=db.backref('identifiers', lazy=True))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 class IdentifierType(db.Model):
     __tablename__ = 'identifier_type'
