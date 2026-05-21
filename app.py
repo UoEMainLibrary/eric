@@ -446,8 +446,11 @@ def media_manager():
     filename = parts[-1]
 
     size_map = {
-        "Size3": 384,
-        "Size4": 768,
+        "Size0": 96,
+        "Size1": 192,
+        "Size2": 384,
+        "Size3": 768,
+        "Size4": 1536,
     }
 
     pixels = size_map.get(size)
