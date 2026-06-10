@@ -139,3 +139,8 @@ data/logs/
 data/output/get_data_checkpoint.json
 data/output/missing_luna_records.csv
 data/db/*.db
+
+*.csv
+*.xlsx
+
+.DS_Store

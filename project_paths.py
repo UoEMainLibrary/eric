@@ -13,6 +13,7 @@ RECENT_ITEMS_CSV = OUTPUT_DIR / "recent_items.csv"
 RECENT_TINYURLS_CSV = OUTPUT_DIR / "recent_item_tinyurls.csv"
 MISSING_LUNA_CSV = OUTPUT_DIR / "missing_luna_records.csv"
 CHECKPOINT_JSON = OUTPUT_DIR / "get_data_checkpoint.json"
+BACKFILL_CHECKPOINT_JSON = OUTPUT_DIR / "backfill_checkpoint.json"
 ERIC_INGEST_CSV = OUTPUT_DIR / "eric_ingest.csv"
 ERIC_DB = DB_DIR / "eric.db"
 
