@@ -30,6 +30,13 @@ SHELFMARK_KEYS = (
     "reference",
     "reference_number",
 )
+CATALOGUE_ENTRY_KEYS = (
+    "catalogue_entry",
+    "catalogue entry",
+    "catalog entry",
+    "catalogue record",
+    "catalogue_record",
+)
 
 
 def parse_args():
@@ -201,6 +208,28 @@ def extract_shelfmark(attributes):
     return ""
 
 
+def extract_catalogue_entry(attributes):
+    if not isinstance(attributes, dict):
+        return ""
+
+    normalised = {normalise_key(key): value for key, value in attributes.items()}
+    for key in CATALOGUE_ENTRY_KEYS:
+        value = normalised.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    for key, value in normalised.items():
+        if (
+            ("catalogue" in key or "catalog" in key)
+            and "entry" in key
+            and isinstance(value, str)
+            and value.strip()
+        ):
+            return value.strip()
+
+    return ""
+
+
 def luna_item_matches_filename(item, filename):
     attrs = parse_luna_attributes(item)
     filename_variants = build_luna_filename_variants(filename)
@@ -241,6 +270,7 @@ def fetch_query_results(field_name, candidate):
         }
     )
     request = Request(f"{LUNA_FETCH_URL}?{query}", headers=LUNA_HEADERS)
+    print(f"{LUNA_FETCH_URL}?{query}")
     with urlopen(request, timeout=REQUEST_TIMEOUT) as response:
         payload = response.read().decode("utf-8")
     results = json.loads(payload)
@@ -322,6 +352,7 @@ def main():
                 "file",
                 "lookup_file",
                 "shelfmark",
+                "catalogue_entry",
                 "luna_identifier",
                 "attempted_queries",
             ],
@@ -335,7 +366,7 @@ def main():
             processed += 1
             lookup_filename = normalise_lookup_filename(original_filename)
             log(
-                f"[{processed}] Looking up {original_filename} as {lookup_filename}",
+                f"[{processed}] Looking up {original_filename} as {lookup_filename} at ",
                 verbose=verbose,
             )
 
@@ -343,6 +374,7 @@ def main():
             attributes = parse_luna_attributes(item) if item else {}
             luna_identifier = item.get("id") or item.get("identity") if item else ""
             shelfmark = extract_shelfmark(attributes)
+            catalogue_entry = extract_catalogue_entry(attributes)
             if luna_identifier:
                 found += 1
 
@@ -351,6 +383,7 @@ def main():
                     "file": original_filename,
                     "lookup_file": lookup_filename,
                     "shelfmark": shelfmark,
+                    "catalogue_entry": catalogue_entry,
                     "luna_identifier": luna_identifier,
                     "attempted_queries": " | ".join(attempted_queries),
                 }
