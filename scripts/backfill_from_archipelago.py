@@ -145,7 +145,26 @@ def merge_objects(target, source, counters):
     counters["deleted_objects"] += 1
 
 
-def reconcile_identifier(obj, shortcode, desired_value, identifier_types, counters):
+def describe_object_for_log(obj):
+    file_ident = get_identifier(obj, "file")
+    luna_ident = get_identifier(obj, "luna")
+    arch_ident = get_identifier(obj, "arch")
+    return (
+        f"object_id={obj.id} "
+        f"file={file_ident.value if file_ident else '-'} "
+        f"luna={luna_ident.value if luna_ident else '-'} "
+        f"arch={arch_ident.value if arch_ident else '-'}"
+    )
+
+
+def reconcile_identifier(
+    obj,
+    shortcode,
+    desired_value,
+    identifier_types,
+    counters,
+    arch_uuid_changes=None,
+):
     if not desired_value:
         return
 
@@ -171,6 +190,32 @@ def reconcile_identifier(obj, shortcode, desired_value, identifier_types, counte
         raise ValueError(
             f"Identifier {desired_value!r} already belongs to object_id={conflict.object_id}."
         )
+
+    if shortcode == "arch" and current_identifiers and arch_uuid_changes is not None:
+        previous_values = sorted(
+            {
+                ident.value
+                for ident in current_identifiers
+                if ident.value and ident.value != desired_value
+            }
+        )
+        if previous_values:
+            arch_uuid_changes.append(
+                {
+                    "object_id": obj.id,
+                    "file": next(
+                        (ident.value for ident in obj.identifiers if ident.type.shortcode == "file"),
+                        None,
+                    ),
+                    "old_arch_values": previous_values,
+                    "new_arch_value": desired_value,
+                }
+            )
+            counters["changed_arch_uuids"] += 1
+            print(
+                "Arch UUID change detected: "
+                f"{describe_object_for_log(obj)} -> new_arch={desired_value}"
+            )
 
     for ident in current_identifiers:
         db.session.delete(ident)
@@ -479,6 +524,8 @@ def process_page_rows(
     counters,
     verbose,
     dry_run=False,
+    load_missing_only=False,
+    arch_uuid_changes=None,
 ):
     if not page_rows:
         return
@@ -488,14 +535,36 @@ def process_page_rows(
         identifier_types,
         shortcodes=("file", "arch", "cantaloupe"),
     )
-    populate_luna_identifiers(page_rows, initial_index, session, luna_cache, counters, verbose)
+    rows_to_consider = []
+    if load_missing_only:
+        for row in page_rows:
+            matches = find_matching_objects_from_index(
+                row,
+                initial_index,
+                shortcodes=("file", "arch", "cantaloupe"),
+            )
+            if matches:
+                counters["skipped_existing_rows"] += 1
+                continue
+            rows_to_consider.append(row)
+    else:
+        rows_to_consider = list(page_rows)
+
+    populate_luna_identifiers(
+        rows_to_consider,
+        initial_index,
+        session,
+        luna_cache,
+        counters,
+        verbose,
+    )
     luna_index = build_object_index(
-        page_rows,
+        rows_to_consider,
         identifier_types,
         shortcodes=("luna",),
     )
 
-    for row in page_rows:
+    for row in rows_to_consider:
         counters["processed_rows"] += 1
         savepoint = db.session.begin_nested()
         try:
@@ -522,6 +591,11 @@ def process_page_rows(
 
             obj = choose_canonical_object(deduped_matches)
 
+            if load_missing_only and obj is not None:
+                counters["skipped_existing_rows"] += 1
+                savepoint.commit()
+                continue
+
             if obj is None:
                 obj = create_object_for_row(row, object_types, counters)
             else:
@@ -532,7 +606,14 @@ def process_page_rows(
             sync_object_metadata(obj, row, object_types, counters)
 
             for shortcode in MANAGED_IDENTIFIER_SHORTCODES:
-                reconcile_identifier(obj, shortcode, row.get(shortcode), identifier_types, counters)
+                reconcile_identifier(
+                    obj,
+                    shortcode,
+                    row.get(shortcode),
+                    identifier_types,
+                    counters,
+                    arch_uuid_changes=arch_uuid_changes,
+                )
 
             ensure_ark_identifier(obj, identifier_types, counters)
             db.session.flush()
@@ -575,6 +656,18 @@ def parse_args():
         help="Resume from the saved backfill checkpoint.",
     )
     parser.add_argument(
+        "--start-offset",
+        type=int,
+        default=0,
+        help="Start the crawl from this JSON:API offset instead of zero.",
+    )
+    parser.add_argument(
+        "--start-page",
+        type=int,
+        default=None,
+        help="Start the crawl from this 1-based page number instead of offset zero.",
+    )
+    parser.add_argument(
         "--checkpoint",
         default=str(BACKFILL_CHECKPOINT_JSON),
         help="Path to the JSON checkpoint file used for resumable runs.",
@@ -604,6 +697,14 @@ def parse_args():
         "--dry-run",
         action="store_true",
         help="Calculate and print the changes, then roll them back instead of committing.",
+    )
+    parser.add_argument(
+        "--load-missing-only",
+        action="store_true",
+        help=(
+            "Only insert rows that are not already present in ERIC. "
+            "Skip object updates, merges, and identifier reconciliation for existing matches."
+        ),
     )
     parser.add_argument(
         "--http-retries",
@@ -637,6 +738,16 @@ def main():
         raise SystemExit("Do not combine --prune-missing-files with --created-since.")
     if args.resume and created_since is not None:
         raise SystemExit("Do not combine --resume with --created-since.")
+    if args.resume and args.start_page is not None:
+        raise SystemExit("Do not combine --resume with --start-page.")
+    if args.resume and args.start_offset:
+        raise SystemExit("Do not combine --resume with --start-offset.")
+    if args.start_page is not None and args.start_offset:
+        raise SystemExit("Use only one of --start-page or --start-offset.")
+    if args.start_page is not None and args.start_page < 1:
+        raise SystemExit("--start-page must be 1 or greater.")
+    if args.start_offset < 0:
+        raise SystemExit("--start-offset must be 0 or greater.")
 
     sort = "-created" if args.newest_first else "created"
     session = build_session(
@@ -653,6 +764,13 @@ def main():
         args.resume,
         sort=sort,
     )
+    if not args.resume:
+        if args.start_page is not None:
+            page_number = args.start_page - 1
+            page_offset = (args.start_page - 1) * args.page_limit
+        else:
+            page_offset = args.start_offset
+            page_number = page_offset // args.page_limit if args.page_limit else 0
 
     if args.resume and (page_offset or page_number):
         log(
@@ -660,15 +778,23 @@ def main():
             f"(offset={page_offset}, sort={sort}).",
             verbose,
         )
+    elif page_offset or page_number:
+        log(
+            f"Starting backfill crawl at page {page_number + 1} "
+            f"(offset={page_offset}, sort={sort}).",
+            verbose,
+        )
 
     with app.app_context():
         counters = Counter()
+        arch_uuid_changes = []
+        pages_processed = 0
         identifier_types = {row.shortcode: row for row in IdentifierType.query.all()}
         object_types = {row.name: row for row in ObjectType.query.all()}
 
         while True:
-            if args.max_pages is not None and page_number >= args.max_pages:
-                log(f"Stopping early after {page_number} page(s) due to --max-pages.", verbose)
+            if args.max_pages is not None and pages_processed >= args.max_pages:
+                log(f"Stopping early after {pages_processed} page(s) due to --max-pages.", verbose)
                 break
 
             raw_objects, source_rows = fetch_source_page(
@@ -711,10 +837,13 @@ def main():
                 counters,
                 verbose,
                 dry_run=args.dry_run,
+                load_missing_only=args.load_missing_only,
+                arch_uuid_changes=arch_uuid_changes,
             )
 
             page_offset += args.page_limit
             page_number += 1
+            pages_processed += 1
             save_checkpoint(
                 args.checkpoint,
                 {
@@ -747,6 +876,19 @@ def main():
             db.session.rollback()
             print("Dry run only: rolled back all database changes.")
 
+        if arch_uuid_changes:
+            print(
+                "Arch UUID changes detected during backfill:"
+            )
+            for change in arch_uuid_changes:
+                old_values = ", ".join(change["old_arch_values"])
+                print(
+                    f"  object_id={change['object_id']} "
+                    f"file={change.get('file') or '-'} "
+                    f"old_arch={old_values} "
+                    f"new_arch={change['new_arch_value']}"
+                )
+
         print(
             "Backfill sync complete. "
             f"swept_images={counters['swept_images']} "
@@ -765,6 +907,8 @@ def main():
             f"missing_luna_rows={counters['missing_luna_rows']} "
             f"missing_cantaloupe_rows={counters['missing_cantaloupe_rows']} "
             f"skipped_old_source_rows={counters['skipped_old_source_rows']} "
+            f"skipped_existing_rows={counters['skipped_existing_rows']} "
+            f"changed_arch_uuids={counters['changed_arch_uuids']} "
             f"errors={counters['errors']}"
         )
 
