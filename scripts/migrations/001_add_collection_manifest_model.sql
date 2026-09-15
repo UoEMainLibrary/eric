@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS `sync_state` (
 -- Seed rows are deliberately idempotent because the existing type tables do
 -- not declare these human-readable values unique.
 INSERT INTO `object_type` (`name`, `url_construct`)
-SELECT 'Digital Object Collection', NULL
+SELECT 'Digital Object Collection', NULL FROM DUAL
 WHERE NOT EXISTS (
     SELECT 1 FROM `object_type` WHERE `name` = 'Digital Object Collection'
 );
@@ -84,7 +84,7 @@ INSERT INTO `identifier_type` (`shortcode`, `description`, `url_construct`)
 SELECT
     'arch_nid',
     'Archipelago Drupal node ID',
-    'https://digital.collections.ed.ac.uk/node/<id>'
+    'https://digital.collections.ed.ac.uk/node/<id>' FROM DUAL
 WHERE NOT EXISTS (
     SELECT 1 FROM `identifier_type` WHERE `shortcode` = 'arch_nid'
 );
