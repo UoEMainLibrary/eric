@@ -86,7 +86,7 @@ class Collection(db.Model):
     )
     shelfmark = db.Column(db.String(255), nullable=True, index=True)
     shelfmark_normalised = db.Column(db.String(255), nullable=True, index=True)
-    title = db.Column(db.String(512), nullable=True)
+    title = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(
         db.DateTime,
@@ -155,7 +155,7 @@ class CollectionItem(db.Model):
         backref=db.backref("collection_items", lazy=True),
     )
     sequence = db.Column(db.Integer, nullable=True)
-    label = db.Column(db.String(512), nullable=True)
+    label = db.Column(db.Text, nullable=True)
     first_seen_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     last_seen_at = db.Column(db.DateTime, nullable=True)
 
