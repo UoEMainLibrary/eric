@@ -71,6 +71,122 @@ class LunaRoute(db.Model):
     route_type = db.Column(db.String(64), nullable=False)
     target_url = db.Column(db.String(2048), nullable=False)
 
+
+class Collection(db.Model):
+    """A source-system-neutral collection, identified through its ERIC Object."""
+
+    __tablename__ = "collection"
+
+    id = db.Column(db.Integer, primary_key=True)
+    object_id = db.Column(db.Integer, db.ForeignKey("object.id"), unique=True, nullable=False)
+    object = db.relationship(
+        "Object",
+        lazy=False,
+        backref=db.backref("collection", uselist=False),
+    )
+    shelfmark = db.Column(db.String(255), nullable=True, index=True)
+    shelfmark_normalised = db.Column(db.String(255), nullable=True, index=True)
+    title = db.Column(db.String(512), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class CollectionSourceRecord(db.Model):
+    """The current record for a Collection in a particular source system."""
+
+    __tablename__ = "collection_source_record"
+
+    id = db.Column(db.Integer, primary_key=True)
+    collection_id = db.Column(db.Integer, db.ForeignKey("collection.id"), nullable=False)
+    collection = db.relationship(
+        "Collection",
+        lazy=False,
+        backref=db.backref("source_records", lazy=True),
+    )
+    source_system = db.Column(db.String(64), nullable=False)
+    primary_identifier_id = db.Column(
+        db.Integer,
+        db.ForeignKey("identifier.id"),
+        nullable=False,
+    )
+    primary_identifier = db.relationship("Identifier", lazy=False)
+    source_url = db.Column(db.String(2048), nullable=True)
+    source_metadata_hash = db.Column(db.String(64), nullable=True)
+    last_seen_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "collection_id",
+            "source_system",
+            "primary_identifier_id",
+            name="uq_collection_source_record",
+        ),
+    )
+
+
+class CollectionItem(db.Model):
+    """An ordered image/Digital Object member of a Collection."""
+
+    __tablename__ = "collection_item"
+
+    id = db.Column(db.Integer, primary_key=True)
+    collection_id = db.Column(db.Integer, db.ForeignKey("collection.id"), nullable=False)
+    collection = db.relationship(
+        "Collection",
+        lazy=False,
+        backref=db.backref("items", lazy=True),
+    )
+    object_id = db.Column(db.Integer, db.ForeignKey("object.id"), nullable=False)
+    object = db.relationship(
+        "Object",
+        lazy=False,
+        backref=db.backref("collection_items", lazy=True),
+    )
+    sequence = db.Column(db.Integer, nullable=True)
+    label = db.Column(db.String(512), nullable=True)
+    first_seen_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at = db.Column(db.DateTime, nullable=True)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "collection_id",
+            "object_id",
+            name="uq_collection_item",
+        ),
+    )
+
+
+class SyncState(db.Model):
+    """Durable progress state for idempotent harvesting jobs."""
+
+    __tablename__ = "sync_state"
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_name = db.Column(db.String(128), unique=True, nullable=False)
+    last_successful_source_time = db.Column(db.DateTime, nullable=True)
+    last_completed_at = db.Column(db.DateTime, nullable=True)
+    status = db.Column(db.String(32), nullable=False, default="pending")
+    details_json = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
 # ------------------------------------------------------------
 # ARK MINTING
 # ------------------------------------------------------------
