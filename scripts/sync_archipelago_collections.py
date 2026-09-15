@@ -13,7 +13,7 @@ import json
 import os
 import sys
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlencode, urljoin
 
 import bootstrap
@@ -60,6 +60,11 @@ SHELFMARK_KEYS = (
 
 class IdentifierConflict(RuntimeError):
     """An externally supplied identifier is already owned by another Object."""
+
+
+def utcnow():
+    """Return a UTC value suitable for ERIC's naive MariaDB DATETIME columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def parse_args():
@@ -307,7 +312,7 @@ def sync_record(record, collection_type, identifier_types, counters):
     collection.title = title or None
     source_record.source_url = f"https://digital.collections.ed.ac.uk/node/{source_nid}"
     source_record.source_metadata_hash = metadata_hash(metadata)
-    source_record.last_seen_at = datetime.utcnow()
+    source_record.last_seen_at = utcnow()
     counters["processed"] += 1
 
 
@@ -371,7 +376,7 @@ def main():
                 state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).one()
                 state.status = "partial" if args.max_pages is not None else "complete"
                 if args.max_pages is None:
-                    state.last_completed_at = datetime.utcnow()
+                    state.last_completed_at = utcnow()
                 state.details_json = state_details(counters)
                 db.session.commit()
         except Exception as exc:
