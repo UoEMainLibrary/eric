@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Synchronise Archipelago Digital Object Collections into ERIC.
+"""Synchronise Archipelago Digital Object Collections into ERIC CompoundObjects.
 
 This is deliberately the first, collection-only harvest.  It creates the
-source-neutral ERIC Collection and its stable ARK, then attaches the current
+source-neutral ERIC CompoundObject and its stable ARK, then attaches the current
 Archipelago collection UUID and Drupal node ID as identifiers.  It does not
 create image memberships; that is the responsibility of a later sync job.
 """
@@ -19,8 +19,8 @@ from urllib.parse import urlencode, urljoin
 import bootstrap
 
 from app import (
-    Collection,
-    CollectionSourceRecord,
+    CompoundObject,
+    CompoundObjectSourceRecord,
     Identifier,
     IdentifierType,
     Object,
@@ -41,7 +41,7 @@ from scripts.archipelago_sweep import (
 
 DEFAULT_JSONAPI_ROOT = "http://lac-dams-live2.is.ed.ac.uk/jsonapi"
 SOURCE_SYSTEM = "archipelago"
-SYNC_JOB_NAME = "archipelago_collections"
+SYNC_JOB_NAME = "archipelago_compound_objects"
 SHELFMARK_KEYS = (
     "shelfmark",
     "work_shelfmark",
@@ -69,7 +69,7 @@ def utcnow():
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Synchronise Archipelago Digital Object Collections into ERIC."
+        description="Synchronise Archipelago Digital Object Collections into ERIC CompoundObjects."
     )
     parser.add_argument(
         "--jsonapi-root",
@@ -210,7 +210,7 @@ def get_identifier_type(shortcode):
 
 def ensure_identifier(obj, identifier_type, value, counters):
     value = str(value).strip()
-    existing = Identifier.query.filter_by(value=value).first()
+    existing = Identifier.query.filter_by(type_id=identifier_type.id, value=value).first()
     if existing:
         if existing.object_id != obj.id:
             raise IdentifierConflict(
@@ -233,9 +233,9 @@ def ensure_identifier(obj, identifier_type, value, counters):
 
 def find_by_source_uuid(source_uuid):
     return (
-        CollectionSourceRecord.query
-        .join(CollectionSourceRecord.primary_identifier)
-        .filter(CollectionSourceRecord.source_system == SOURCE_SYSTEM)
+        CompoundObjectSourceRecord.query
+        .join(CompoundObjectSourceRecord.primary_identifier)
+        .filter(CompoundObjectSourceRecord.source_system == SOURCE_SYSTEM)
         .filter(Identifier.value == source_uuid)
         .first()
     )
@@ -244,7 +244,7 @@ def find_by_source_uuid(source_uuid):
 def find_unique_by_shelfmark(shelfmark_normalised):
     if not shelfmark_normalised:
         return None
-    matches = Collection.query.filter_by(shelfmark_normalised=shelfmark_normalised).all()
+    matches = CompoundObject.query.filter_by(shelfmark_normalised=shelfmark_normalised).all()
     if len(matches) > 1:
         raise RuntimeError(
             f"Ambiguous shelfmark {shelfmark_normalised!r}: {len(matches)} collections match"
@@ -252,19 +252,19 @@ def find_unique_by_shelfmark(shelfmark_normalised):
     return matches[0] if matches else None
 
 
-def create_collection(collection_type, identifier_types, counters):
-    collection_object = Object(type_id=collection_type.id, primary_id=None)
+def create_compound_object(compound_object_type, identifier_types, counters):
+    collection_object = Object(type_id=compound_object_type.id, primary_id=None)
     db.session.add(collection_object)
     db.session.flush()
     ark_identifier = ensure_identifier(
         collection_object, identifier_types["ark"], mint_ark(), counters
     )
     collection_object.primary_id = ark_identifier.value
-    collection = Collection(object_id=collection_object.id)
-    db.session.add(collection)
+    compound_object = CompoundObject(object_id=collection_object.id)
+    db.session.add(compound_object)
     db.session.flush()
-    counters["created_collections"] += 1
-    return collection
+    counters["created_compound_objects"] += 1
+    return compound_object
 
 
 def sync_record(record, collection_type, identifier_types, counters):
@@ -283,33 +283,33 @@ def sync_record(record, collection_type, identifier_types, counters):
 
     source_record = find_by_source_uuid(source_uuid)
     if source_record:
-        collection = source_record.collection
+        compound_object = source_record.compound_object
         counters["matched_source_uuid"] += 1
     else:
-        collection = find_unique_by_shelfmark(shelfmark_normalised)
-        if collection:
+        compound_object = find_unique_by_shelfmark(shelfmark_normalised)
+        if compound_object:
             counters["matched_shelfmark"] += 1
         else:
-            collection = create_collection(collection_type, identifier_types, counters)
+            compound_object = create_compound_object(compound_object_type, identifier_types, counters)
 
-    collection_object = collection.object
+    collection_object = compound_object.object
     source_identifier = ensure_identifier(
         collection_object, identifier_types["arch"], source_uuid, counters
     )
     ensure_identifier(collection_object, identifier_types["arch_nid"], source_nid, counters)
 
     if source_record is None:
-        source_record = CollectionSourceRecord(
-            collection_id=collection.id,
+        source_record = CompoundObjectSourceRecord(
+            compound_object_id=compound_object.id,
             source_system=SOURCE_SYSTEM,
             primary_identifier_id=source_identifier.id,
         )
         db.session.add(source_record)
         counters["created_source_records"] += 1
 
-    collection.shelfmark = shelfmark or None
-    collection.shelfmark_normalised = shelfmark_normalised or None
-    collection.title = title or None
+    compound_object.shelfmark = shelfmark or None
+    compound_object.shelfmark_normalised = shelfmark_normalised or None
+    compound_object.title = title or None
     source_record.source_url = f"https://digital.collections.ed.ac.uk/node/{source_nid}"
     source_record.source_metadata_hash = metadata_hash(metadata)
     source_record.last_seen_at = utcnow()
@@ -332,9 +332,9 @@ def main():
     )
 
     with app.app_context():
-        collection_type = ObjectType.query.filter_by(name="Digital Object Collection").first()
-        if collection_type is None:
-            raise SystemExit("Missing ObjectType 'Digital Object Collection'; apply migration first.")
+        compound_object_type = ObjectType.query.filter_by(name="Compound Object").first()
+        if compound_object_type is None:
+            raise SystemExit("Missing ObjectType 'Compound Object'; apply migration first.")
         identifier_types = {
             shortcode: get_identifier_type(shortcode)
             for shortcode in ("ark", "arch", "arch_nid")
@@ -361,7 +361,7 @@ def main():
             ):
                 savepoint = db.session.begin_nested()
                 try:
-                    sync_record(record, collection_type, identifier_types, counters)
+                    sync_record(record, compound_object_type, identifier_types, counters)
                     db.session.flush()
                     savepoint.commit()
                 except Exception as exc:
@@ -394,9 +394,9 @@ def main():
             raise SystemExit(f"Collection sync failed: {exc}") from exc
 
         print(
-            "Collection sync complete. "
+            "Compound-object sync complete. "
             f"processed={counters['processed']} "
-            f"created_collections={counters['created_collections']} "
+            f"created_compound_objects={counters['created_compound_objects']} "
             f"matched_source_uuid={counters['matched_source_uuid']} "
             f"matched_shelfmark={counters['matched_shelfmark']} "
             f"created_source_records={counters['created_source_records']} "

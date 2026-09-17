@@ -185,7 +185,7 @@ def reconcile_identifier(
                 counters["deleted_identifiers"] += 1
         return
 
-    conflict = Identifier.query.filter_by(value=desired_value).first()
+    conflict = Identifier.query.filter_by(type_id=id_type.id, value=desired_value).first()
     if conflict and conflict.object_id != obj.id:
         raise ValueError(
             f"Identifier {desired_value!r} already belongs to object_id={conflict.object_id}."

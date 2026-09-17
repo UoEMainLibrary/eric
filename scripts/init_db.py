@@ -7,9 +7,13 @@ def init_identifier_types():
         ("ark", "Archival Resource Key", "https://n2t.net/ark:/83794/<id>"),
         ("luna", "LUNA Image ID", "https://images.is.ed.ac.uk/luna/servlet/detail/<id>"),
         ("arch", "Archipelago UUID", "https://digital.collections.ed.ac.uk/do/<id>"),
+        ("arch_nid", "Archipelago Drupal node ID", "https://digital.collections.ed.ac.uk/node/<id>"),
         ("file", "Source Filename", None),
         ("cantaloupe", "IIIF Cantaloupe ID", 
-         "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/<id>/full/600,/0/default.jpg")
+         "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/<id>/full/600,/0/default.jpg"),
+        ("archives_space", "ArchivesSpace record ID", None),
+        ("alma", "Alma record ID", None),
+        ("vernon", "Vernon record ID", None),
     ]
 
     for shortcode, desc, url in defaults:
@@ -30,6 +34,7 @@ def init_object_types():
     """Insert minimal default object types."""
     defaults = [
         ("Image", None),  # no URL construct at object level
+        ("Compound Object", None),
     ]
 
     for name, url in defaults:

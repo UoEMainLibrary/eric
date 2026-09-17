@@ -141,7 +141,7 @@ def set_identifier(obj, identifier_type, value, counters, replace=False):
                     db.session.delete(item)
                     counters["removed_identifiers"] += 1
         return found
-    owner = Identifier.query.filter_by(value=value).first()
+    owner = Identifier.query.filter_by(type_id=identifier_type.id, value=value).first()
     if owner and owner.object_id != obj.id:
         raise RuntimeError(
             f"{identifier_type.shortcode} value {value!r} belongs to object_id={owner.object_id}"

@@ -49,13 +49,19 @@ class ObjectType(db.Model):
 
 class Identifier(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    value = db.Column(db.String(128), unique=True, nullable=False, index=True)
+    # Values are unique within their identifier scheme, not globally.  For
+    # example a numeric ArchivesSpace ID may legitimately equal a Drupal NID.
+    value = db.Column(db.String(128), nullable=False, index=True)
     object_id = db.Column(db.Integer, db.ForeignKey('object.id'), nullable=False)
     object = db.relationship('Object', backref=db.backref('identifiers', lazy=True))
     type_id = db.Column(db.Integer, db.ForeignKey('identifier_type.id'), nullable=False)
     type = db.relationship('IdentifierType', lazy=False, backref=db.backref('identifiers', lazy=True))
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint("type_id", "value", name="uq_identifier_type_value"),
+    )
 
 class IdentifierType(db.Model):
     __tablename__ = 'identifier_type'
@@ -72,18 +78,20 @@ class LunaRoute(db.Model):
     target_url = db.Column(db.String(2048), nullable=False)
 
 
-class Collection(db.Model):
-    """A source-system-neutral collection, identified through its ERIC Object."""
+class CompoundObject(db.Model):
+    """A source-system-neutral work with ordered image/Object members."""
 
-    __tablename__ = "collection"
+    __tablename__ = "compound_object"
 
     id = db.Column(db.Integer, primary_key=True)
     object_id = db.Column(db.Integer, db.ForeignKey("object.id"), unique=True, nullable=False)
     object = db.relationship(
         "Object",
         lazy=False,
-        backref=db.backref("collection", uselist=False),
+        backref=db.backref("compound_object", uselist=False),
     )
+    # Controlled values: archives, rare_books, museums.
+    domain = db.Column(db.String(32), nullable=True, index=True)
     shelfmark = db.Column(db.String(255), nullable=True, index=True)
     shelfmark_normalised = db.Column(db.String(255), nullable=True, index=True)
     title = db.Column(db.Text, nullable=True)
@@ -96,15 +104,15 @@ class Collection(db.Model):
     )
 
 
-class CollectionSourceRecord(db.Model):
-    """The current record for a Collection in a particular source system."""
+class CompoundObjectSourceRecord(db.Model):
+    """The current source-system record for a CompoundObject."""
 
-    __tablename__ = "collection_source_record"
+    __tablename__ = "compound_object_source_record"
 
     id = db.Column(db.Integer, primary_key=True)
-    collection_id = db.Column(db.Integer, db.ForeignKey("collection.id"), nullable=False)
-    collection = db.relationship(
-        "Collection",
+    compound_object_id = db.Column(db.Integer, db.ForeignKey("compound_object.id"), nullable=False)
+    compound_object = db.relationship(
+        "CompoundObject",
         lazy=False,
         backref=db.backref("source_records", lazy=True),
     )
@@ -128,23 +136,23 @@ class CollectionSourceRecord(db.Model):
 
     __table_args__ = (
         db.UniqueConstraint(
-            "collection_id",
+            "compound_object_id",
             "source_system",
             "primary_identifier_id",
-            name="uq_collection_source_record",
+            name="uq_compound_object_source_record",
         ),
     )
 
 
-class CollectionItem(db.Model):
-    """An ordered image/Digital Object member of a Collection."""
+class CompoundObjectItem(db.Model):
+    """An ordered image/Digital Object member of a CompoundObject."""
 
-    __tablename__ = "collection_item"
+    __tablename__ = "compound_object_item"
 
     id = db.Column(db.Integer, primary_key=True)
-    collection_id = db.Column(db.Integer, db.ForeignKey("collection.id"), nullable=False)
-    collection = db.relationship(
-        "Collection",
+    compound_object_id = db.Column(db.Integer, db.ForeignKey("compound_object.id"), nullable=False)
+    compound_object = db.relationship(
+        "CompoundObject",
         lazy=False,
         backref=db.backref("items", lazy=True),
     )
@@ -152,7 +160,7 @@ class CollectionItem(db.Model):
     object = db.relationship(
         "Object",
         lazy=False,
-        backref=db.backref("collection_items", lazy=True),
+        backref=db.backref("compound_object_items", lazy=True),
     )
     sequence = db.Column(db.Integer, nullable=True)
     label = db.Column(db.Text, nullable=True)
@@ -161,9 +169,9 @@ class CollectionItem(db.Model):
 
     __table_args__ = (
         db.UniqueConstraint(
-            "collection_id",
+            "compound_object_id",
             "object_id",
-            name="uq_collection_item",
+            name="uq_compound_object_item",
         ),
     )
 
@@ -357,9 +365,13 @@ def init_identifier_types():
         ("ark", "Archival Resource Key", "https://id.collections.ed.ac.uk/ark:/83794/<id>"),
         ("luna", "LUNA Image ID", "https://images.is.ed.ac.uk/luna/servlet/detail/<id>"),
         ("arch", "Archipelago UUID", "https://digital.collections.ed.ac.uk/do/<id>"),
+        ("arch_nid", "Archipelago Drupal node ID", "https://digital.collections.ed.ac.uk/node/<id>"),
         ("file", "Source Filename", None),
         ("cantaloupe", "IIIF Cantaloupe ID",
-         "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/<id>/full/600,/0/default.jpg")
+         "https://digital.collections.ed.ac.uk/cantaloupe/iiif/2/<id>/full/600,/0/default.jpg"),
+        ("archives_space", "ArchivesSpace record ID", None),
+        ("alma", "Alma record ID", None),
+        ("vernon", "Vernon record ID", None),
     ]
     for shortcode, desc, url in defaults:
         if not IdentifierType.query.filter_by(shortcode=shortcode).first():

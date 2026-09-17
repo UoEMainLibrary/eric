@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Populate ordered Collection-to-Digital-Object relationships in ERIC."""
+"""Populate ordered CompoundObject-to-Digital-Object relationships in ERIC."""
 
 import argparse
 import json
@@ -13,8 +13,8 @@ from urllib.parse import urlencode, urljoin
 import bootstrap
 
 from app import (
-    Collection,
-    CollectionItem,
+    CompoundObject,
+    CompoundObjectItem,
     Identifier,
     IdentifierType,
     Object,
@@ -32,7 +32,7 @@ from scripts.archipelago_sweep import (
 
 
 DEFAULT_JSONAPI_ROOT = "http://lac-dams-live2.is.ed.ac.uk/jsonapi"
-SYNC_JOB_NAME = "archipelago_collection_items"
+SYNC_JOB_NAME = "archipelago_compound_object_items"
 PARENT_KEY_CANDIDATES = (
     "ispartof",
     "is_part_of",
@@ -44,7 +44,7 @@ PARENT_KEY_CANDIDATES = (
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Synchronise Archipelago Digital Object collection memberships into ERIC."
+        description="Synchronise Archipelago Digital Object compound-object memberships into ERIC."
     )
     parser.add_argument(
         "--jsonapi-root",
@@ -168,10 +168,10 @@ def iter_digital_objects(session, jsonapi_root, page_limit, max_pages, timeout, 
         next_url = urljoin(endpoint, href) if isinstance(href, str) and href else None
 
 
-def load_collections_by_arch_nid(arch_nid_type):
+def load_compound_objects_by_arch_nid(arch_nid_type):
     rows = (
-        db.session.query(Identifier.value, Collection)
-        .join(Collection, Collection.object_id == Identifier.object_id)
+        db.session.query(Identifier.value, CompoundObject)
+        .join(CompoundObject, CompoundObject.object_id == Identifier.object_id)
         .filter(Identifier.type_id == arch_nid_type.id)
         .all()
     )
@@ -180,7 +180,7 @@ def load_collections_by_arch_nid(arch_nid_type):
         existing = result.get(value)
         if existing and existing.id != collection.id:
             raise RuntimeError(
-                f"Archipelago NID {value!r} is attached to multiple Collections."
+                f"Archipelago NID {value!r} is attached to multiple CompoundObjects."
             )
         result[value] = collection
     return result
@@ -228,29 +228,31 @@ def ensure_arch_nid(obj, nid, arch_nid_type, arch_nid_owners, counters):
     counters["created_arch_nid_identifiers"] += 1
 
 
-def upsert_collection_item(collection, obj, sequence, label, counters):
-    item = CollectionItem.query.filter_by(collection_id=collection.id, object_id=obj.id).first()
+def upsert_compound_object_item(compound_object, obj, sequence, label, counters):
+    item = CompoundObjectItem.query.filter_by(
+        compound_object_id=compound_object.id, object_id=obj.id
+    ).first()
     if item is None:
-        item = CollectionItem(
-            collection_id=collection.id,
+        item = CompoundObjectItem(
+            compound_object_id=compound_object.id,
             object_id=obj.id,
             sequence=sequence,
             label=label or None,
             first_seen_at=utcnow(),
         )
         db.session.add(item)
-        counters["created_collection_items"] += 1
+        counters["created_compound_object_items"] += 1
     else:
         item.sequence = sequence
         item.label = label or None
-        counters["updated_collection_items"] += 1
+        counters["updated_compound_object_items"] += 1
     item.last_seen_at = utcnow()
 
 
 def process_record(
     record,
     objects_by_arch_uuid,
-    collections_by_nid,
+    compound_objects_by_nid,
     arch_nid_type,
     arch_nid_owners,
     counters,
@@ -267,7 +269,7 @@ def process_record(
     metadata = parse_metadata(attributes)
     parent_nids = extract_parent_nids(metadata)
     if not parent_nids:
-        counters["without_collection_parent"] += 1
+        counters["without_compound_object_parent"] += 1
         return
 
     obj = objects_by_arch_uuid.get(source_uuid)
@@ -284,23 +286,23 @@ def process_record(
     label = extract_label(attributes, metadata)
     matched_parent = False
     for parent_nid in parent_nids:
-        collection = collections_by_nid.get(str(parent_nid))
-        if collection is None:
-            counters["missing_collections"] += 1
+        compound_object = compound_objects_by_nid.get(str(parent_nid))
+        if compound_object is None:
+            counters["missing_compound_objects"] += 1
             print(
-                f"No ERIC Collection has Archipelago NID {parent_nid} "
+                f"No ERIC CompoundObject has Archipelago NID {parent_nid} "
                 f"(child {source_uuid}).",
                 file=sys.stderr,
             )
             continue
-        upsert_collection_item(collection, obj, sequence, label, counters)
+        upsert_compound_object_item(compound_object, obj, sequence, label, counters)
         matched_parent = True
 
     if matched_parent:
         counters["processed_digital_objects"] += 1
 
 
-def process_page(records, collections_by_nid, arch_type, arch_nid_type, arch_nid_owners, counters):
+def process_page(records, compound_objects_by_nid, arch_type, arch_nid_type, arch_nid_owners, counters):
     source_uuids = {str(record.get("id") or "").strip() for record in records}
     objects_by_arch_uuid = load_objects_by_arch_uuid(source_uuids, arch_type)
 
@@ -310,7 +312,7 @@ def process_page(records, collections_by_nid, arch_type, arch_nid_type, arch_nid
             process_record(
                 record,
                 objects_by_arch_uuid,
-                collections_by_nid,
+                compound_objects_by_nid,
                 arch_nid_type,
                 arch_nid_owners,
                 counters,
@@ -344,7 +346,7 @@ def main():
         if arch_type is None or arch_nid_type is None:
             raise SystemExit("Missing 'arch' or 'arch_nid' IdentifierType; apply migration first.")
 
-        collections_by_nid = load_collections_by_arch_nid(arch_nid_type)
+        compound_objects_by_nid = load_compound_objects_by_arch_nid(arch_nid_type)
         arch_nid_owners = load_arch_nid_owners(arch_nid_type)
         counters = Counter()
         state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).first()
@@ -370,7 +372,7 @@ def main():
                 try:
                     process_page(
                         records,
-                        collections_by_nid,
+                        compound_objects_by_nid,
                         arch_type,
                         arch_nid_type,
                         arch_nid_owners,
@@ -401,17 +403,17 @@ def main():
                 counters["fatal_errors"] += 1
                 state.details_json = state_details(counters)
                 db.session.commit()
-            raise SystemExit(f"Collection-item sync failed: {exc}") from exc
+            raise SystemExit(f"Compound-object-item sync failed: {exc}") from exc
 
         print(
-            "Collection-item sync complete. "
+            "Compound-object-item sync complete. "
             f"pages={counters['pages']} "
             f"processed_digital_objects={counters['processed_digital_objects']} "
-            f"created_collection_items={counters['created_collection_items']} "
-            f"updated_collection_items={counters['updated_collection_items']} "
+            f"created_compound_object_items={counters['created_compound_object_items']} "
+            f"updated_compound_object_items={counters['updated_compound_object_items']} "
             f"created_arch_nid_identifiers={counters['created_arch_nid_identifiers']} "
             f"missing_eric_objects={counters['missing_eric_objects']} "
-            f"missing_collections={counters['missing_collections']} "
+            f"missing_compound_objects={counters['missing_compound_objects']} "
             f"arch_nid_conflicts={counters['arch_nid_conflicts']} "
             f"record_errors={counters['record_errors']} "
             f"page_errors={counters['page_errors']}"

@@ -59,7 +59,7 @@ def find_existing_object(row, identifier_types):
 
 
 def ensure_identifier(obj, id_type, value):
-    existing = Identifier.query.filter_by(value=value).first()
+    existing = Identifier.query.filter_by(type_id=id_type.id, value=value).first()
     if existing:
         if existing.object_id != obj.id or existing.type_id != id_type.id:
             print(
