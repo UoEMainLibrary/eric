@@ -37,8 +37,14 @@ from scripts.archipelago_sweep import (
 DEFAULT_JSONAPI_ROOT = "http://lac-dams-live2.is.ed.ac.uk/jsonapi"
 SYNC_JOB_NAME = "archipelago_compound_object_catalogue_data"
 SOURCE_ID_KEYS = ("source_id", "source id")
+INTERNAL_TYPE_KEYS = ("internal_type", "internal type")
 PARENT_KEYS = ("ismemberof", "is_member_of", "is member of", "ispartof", "is_part_of", "is part of")
 DOMAINS = {"archives", "rare_books", "museums"}
+INTERNAL_TYPE_DOMAINS = {
+    "archivesspace": "archives",
+    "alma": "rare_books",
+    "vernon": "museums",
+}
 
 # These are the established top-level Digital Collections nodes.  Keeping this
 # small mapping in code makes classification explicit and reviewable; extra
@@ -144,13 +150,32 @@ def parse_root_domains(entries):
 
 
 def classify_domain(metadata, root_domains):
-    """Return domain from known collection roots, with Alma's 99... ID as a check."""
+    """Return domain from Archipelago's backend marker, then safe fallbacks."""
+    internal_types = {
+        "".join(character for character in value.lower() if character.isalnum())
+        for value in metadata_values(metadata, INTERNAL_TYPE_KEYS)
+    }
+    internal_domains = {
+        INTERNAL_TYPE_DOMAINS[value]
+        for value in internal_types
+        if value in INTERNAL_TYPE_DOMAINS
+    }
+    if len(internal_domains) > 1:
+        raise RuntimeError(f"Conflicting internal_type values: {sorted(internal_types)}")
+
     parent_nids = metadata_values(metadata, PARENT_KEYS)
     mapped = {root_domains[value] for value in parent_nids if value in root_domains}
     if len(mapped) > 1:
         raise RuntimeError(f"Conflicting top-level domains in parent metadata: {sorted(mapped)}")
 
-    domain = next(iter(mapped), None)
+    internal_domain = next(iter(internal_domains), None)
+    parent_domain = next(iter(mapped), None)
+    if internal_domain and parent_domain and internal_domain != parent_domain:
+        raise RuntimeError(
+            f"internal_type gives {internal_domain}, but parent hierarchy gives {parent_domain}"
+        )
+
+    domain = internal_domain or parent_domain
     source_ids = metadata_values(metadata, SOURCE_ID_KEYS)
     source_id = source_ids[0] if source_ids else ""
     # Alma MMS IDs are expected to start 99 (for example 9924294442602466).
