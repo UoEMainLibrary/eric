@@ -37,6 +37,17 @@ from scripts.archipelago_sweep import (
 
 PUBLIC_NODE_ROOT = "https://digital.collections.ed.ac.uk/node"
 SYNC_JOB_NAME = "archipelago_compound_object_public_page_repair"
+# The public Drupal front end rejects Requests' default Python user agent on
+# some node pages.  These are ordinary browser navigation headers, used only
+# for the narrow public-page fallback (not for the JSON:API sync).
+PUBLIC_NODE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://digital.collections.ed.ac.uk/",
+}
 INTERNAL_TYPE_DOMAINS = {
     "archivesspace": "archives",
     "alma": "rare_books",
@@ -133,7 +144,7 @@ def node_nid(source_url):
 def fetch_metadata(session, nid, timeout):
     json_response = session.get(
         f"{PUBLIC_NODE_ROOT}/{nid}?_format=json",
-        headers={"Accept": "application/json"}, timeout=timeout,
+        headers=PUBLIC_NODE_HEADERS, timeout=timeout,
     )
     if json_response.ok:
         try:
@@ -143,7 +154,9 @@ def fetch_metadata(session, nid, timeout):
         if metadata:
             return metadata
 
-    page_response = session.get(f"{PUBLIC_NODE_ROOT}/{nid}", timeout=timeout)
+    page_response = session.get(
+        f"{PUBLIC_NODE_ROOT}/{nid}", headers=PUBLIC_NODE_HEADERS, timeout=timeout
+    )
     page_response.raise_for_status()
     internal_match = INTERNAL_TYPE_PATTERN.search(page_response.text)
     source_match = SOURCE_ID_PATTERN.search(page_response.text)
