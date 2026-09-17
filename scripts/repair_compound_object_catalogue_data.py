@@ -58,6 +58,10 @@ def utcnow():
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--compound-object-id", type=int, action="append", dest="compound_object_ids",
+        help="Repair one specified ERIC compound object ID; repeatable.",
+    )
     parser.add_argument("--timeout", type=int, default=REQUEST_TIMEOUT)
     parser.add_argument("--http-retries", type=int, default=DEFAULT_HTTP_RETRIES)
     parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF)
@@ -217,6 +221,8 @@ def main():
             .filter(CompoundObjectSourceRecord.source_url.isnot(None))
             .order_by(CompoundObject.id)
         )
+        if args.compound_object_ids:
+            query = query.filter(CompoundObject.id.in_(args.compound_object_ids))
         if args.limit is not None:
             query = query.limit(args.limit)
         source_records = query.all()
