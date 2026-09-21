@@ -563,6 +563,7 @@ def luna_iiif(identifier, iiif_params):
 # ------------------------------------------------------------
 # NEW: LEGACY LUNA TINYURL → ARCH
 # ------------------------------------------------------------
+@app.route("/s/<token>")
 @app.route("/luna/servlet/s/<token>")
 def luna_shortlink(token):
     row = LunaRoute.query.filter_by(token=token).first()
