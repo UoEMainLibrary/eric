@@ -360,6 +360,33 @@ def extract_luna_identifier_from_target(target_url):
 
     return None
 
+def extract_luna_identifier_from_route(route, seen_tokens=None):
+    """Find an image identifier behind a stored TinyURL route.
+
+    A small number of legacy tokens point to another LUNA shortlink. Follow
+    those links internally, with loop protection for malformed mappings.
+    """
+    identifier = extract_luna_identifier_from_target(route.target_url)
+    if identifier:
+        return identifier
+
+    parsed = urlparse(route.target_url)
+    shortlink_match = re.search(r"/luna/servlet/s/([^/?#]+)", parsed.path)
+    if not shortlink_match:
+        return None
+
+    seen_tokens = seen_tokens or set()
+    token = shortlink_match.group(1)
+    if token in seen_tokens:
+        return None
+
+    nested_route = LunaRoute.query.filter_by(token=token).first()
+    if not nested_route:
+        return None
+
+    seen_tokens.add(token)
+    return extract_luna_identifier_from_route(nested_route, seen_tokens)
+
 def init_identifier_types():
     defaults = [
         ("ark", "Archival Resource Key", "https://id.collections.ed.ac.uk/ark:/83794/<id>"),
@@ -542,7 +569,7 @@ def luna_shortlink(token):
     if not row:
         abort(404)
 
-    identifier = extract_luna_identifier_from_target(row.target_url)
+    identifier = extract_luna_identifier_from_route(row, seen_tokens={token})
     if not identifier:
         abort(404)
 

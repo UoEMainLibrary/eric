@@ -29,4 +29,8 @@ Useful commands:
 - `python3 scripts/backfill_from_archipelago.py --resume` continues a long-running backfill from `data/output/backfill_checkpoint.json`.
 - `python3 scripts/backfill_from_archipelago.py --created-since 2026-06-01 --dry-run` runs a recent-only newest-first sweep based on Archipelago `created`.
 - `python3 scripts/backfill_from_archipelago.py --prune-missing-files` also deletes objects whose `file` identifier is no longer present in a known-complete live sweep.
-- `python3 scripts/ingest_luna_routes.py` loads the generated TinyURL route CSV into the database.
+- `python3 scripts/ingest_luna_routes.py` loads the MariaDB TinyURL export at
+  `data/tinyurls.txt` into `luna_route`. It is safe to re-run: existing tokens
+  are updated only when their stored route changes. Use `--dry-run` to verify
+  the source first, or pass `data/output/recent_item_tinyurls.csv` to import
+  the generated CSV workflow instead.
