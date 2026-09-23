@@ -201,6 +201,8 @@ class SyncState(db.Model):
 NAAN = "83794"
 LUNA_IDENTIFIER_RE = re.compile(r"\b[A-Za-z0-9]+~\d+~\d+~\d+~\d+\b")
 BROWSER_SAFE_LONG_SIDE_PIXELS = 1536
+LUNA_MANIFEST_URL_BASE = "https://manifest.collections.ed.ac.uk/v3/luna"
+MANIFEST_URL_BASE = "https://manifest.collections.ed.ac.uk/v3"
 
 def mint_ark():
     suffix = str(uuid.uuid4())
@@ -343,6 +345,48 @@ def redirect_luna_identifier_to_arch(identifier):
 
     arch_url = construct_url(arch_ident.type.url_construct, arch_ident.value)
     return redirect(arch_url, code=302)
+
+def redirect_luna_identifier_to_cantaloupe(identifier, iiif_params):
+    """Resolve a LUNA image identifier and redirect to its Cantaloupe image."""
+    identifier = normalise_identifier_value(identifier).split(":", 1)[0]
+    _, obj = fetch_object_for_identifier(identifier)
+
+    cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
+    if not cant_ident:
+        abort(404)
+
+    cant_url = get_cantaloupe_base_url(cant_ident)
+    return redirect(f"{cant_url}/{iiif_params}", code=302)
+
+def normalise_book_shelfmark(value):
+    """Turn the LUNA BOOK path component (for example ``Ms12``) into ``MS 12``."""
+    return re.sub(r"(?<=[A-Za-z])(?=\d)", " ", (value or "").strip()).upper()
+
+def redirect_book_to_manifest(mediafile):
+    parts = mediafile.strip("/").split("/")
+    if len(parts) < 5 or parts[0] != "BOOK":
+        abort(404)
+
+    shelfmark = normalise_book_shelfmark(parts[-2])
+    compounds = (
+        CompoundObject.query
+        .options(joinedload(CompoundObject.object).joinedload(Object.identifiers).joinedload(Identifier.type))
+        .filter_by(shelfmark_normalised=shelfmark)
+        .all()
+    )
+    if len(compounds) != 1:
+        app.logger.warning(
+            "BOOK reader could not uniquely match shelfmark=%s mediafile=%s matches=%s",
+            shelfmark,
+            mediafile,
+            len(compounds),
+        )
+        abort(404)
+
+    ark_ident = get_identifier_by_shortcode(compounds[0].object, "ark")
+    if not ark_ident:
+        abort(404)
+    return redirect(f"{MANIFEST_URL_BASE}/{ark_ident.value}/manifest", code=302)
 
 def extract_luna_identifier_from_target(target_url):
     parsed = urlparse(target_url)
@@ -546,19 +590,40 @@ def luna_widget_detail(identifier):
 # ------------------------------------------------------------
 # NEW: LUNA IIIF → CANTALOUPE
 # ------------------------------------------------------------
+@app.route("/luna/servlet/iiif/m/<identifier>/manifest", strict_slashes=False)
+def luna_manifest(identifier):
+    """Redirect a legacy one-image LUNA manifest URL to its replacement."""
+    identifier = normalise_identifier_value(identifier)
+    fetch_object_for_identifier(identifier)
+    return redirect(f"{LUNA_MANIFEST_URL_BASE}/{identifier}/manifest", code=302)
+
+@app.route("/luna/servlet/iiif/<identifier>", strict_slashes=False)
+def luna_iiif_info(identifier):
+    """Redirect a bare legacy IIIF Image service URL to its info document."""
+    return redirect_luna_identifier_to_cantaloupe(identifier, "info.json")
+
 @app.route("/luna/servlet/iiif/<identifier>/<path:iiif_params>")
 def luna_iiif(identifier, iiif_params):
     identifier = normalise_identifier_value(identifier)
     _, obj = fetch_object_for_identifier(identifier)
+    rewritten_params = normalise_iiif_size_request(iiif_params, obj.id)
+    return redirect_luna_identifier_to_cantaloupe(identifier, rewritten_params)
 
-    cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
-    if not cant_ident:
+# ------------------------------------------------------------
+# LEGACY LUNA MEDIA PLAYER → CANTALOUPE
+# ------------------------------------------------------------
+@app.route("/luna/servlet/workspace/handleMediaPlayer", strict_slashes=False)
+@app.route("/luna/servlet/workspace/handleMediaPlayer;<path:session_id>", strict_slashes=False)
+def luna_media_player(session_id=None):
+    """Resolve a legacy LUNA media-player URL to a browser-safe image."""
+    identifier = request.args.get("lunaMediaId")
+    if not identifier:
         abort(404)
 
-    cant_url = get_cantaloupe_base_url(cant_ident)
-    rewritten_params = normalise_iiif_size_request(iiif_params, obj.id)
-    final_url = f"{cant_url}/{rewritten_params}"
-    return redirect(final_url, code=302)
+    safe_size = f"!{BROWSER_SAFE_LONG_SIDE_PIXELS},{BROWSER_SAFE_LONG_SIDE_PIXELS}"
+    return redirect_luna_identifier_to_cantaloupe(
+        identifier, f"full/{safe_size}/0/default.jpg"
+    )
 
 # ------------------------------------------------------------
 # NEW: LEGACY LUNA TINYURL → ARCH
@@ -600,6 +665,9 @@ def media_manager():
 
     size = parts[0]
     filename = parts[-1]
+
+    if size == "BOOK":
+        return redirect_book_to_manifest(mediafile)
 
     size_map = {
         "Size0": 96,
