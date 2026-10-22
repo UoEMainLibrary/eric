@@ -743,13 +743,11 @@ def simulate_images_host(subpath):
 # ------------------------------------------------------------
 # ARK RESOLUTION WITH MULTIPLE FORMATS
 # ------------------------------------------------------------
-@app.route("/ark:/<naan>/<path:suffix>")
-def resolve_ark(naan, suffix):
+def fetch_object_for_ark(naan, suffix):
     if naan != NAAN:
         abort(404)
 
     full_ark = f"ark:/{naan}/{suffix}"
-
     ident = Identifier.query.filter_by(value=full_ark).first()
     if not ident:
         abort(404)
@@ -762,6 +760,32 @@ def resolve_ark(naan, suffix):
     )
     if not obj:
         abort(404)
+    return full_ark, obj
+
+
+def redirect_ark_to_cantaloupe(naan, suffix, iiif_params):
+    _, obj = fetch_object_for_ark(naan, suffix)
+    cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
+    if not cant_ident:
+        abort(404)
+    return redirect(f"{get_cantaloupe_base_url(cant_ident)}/{iiif_params}", code=302)
+
+
+@app.route("/ark:/<naan>/<ark_suffix>/iiif", strict_slashes=False)
+def ark_iiif_info(naan, ark_suffix):
+    """Resolve an image ARK's bare IIIF service URL to Cantaloupe info.json."""
+    return redirect_ark_to_cantaloupe(naan, ark_suffix, "info.json")
+
+
+@app.route("/ark:/<naan>/<ark_suffix>/iiif/<path:iiif_params>")
+def ark_iiif(naan, ark_suffix, iiif_params):
+    """Resolve an image ARK's IIIF Image API request to Cantaloupe."""
+    return redirect_ark_to_cantaloupe(naan, ark_suffix, iiif_params)
+
+
+@app.route("/ark:/<naan>/<path:suffix>")
+def resolve_ark(naan, suffix):
+    full_ark, obj = fetch_object_for_ark(naan, suffix)
 
     # Determine requested format
     fmt = request.args.get("format")
