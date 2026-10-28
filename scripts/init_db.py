@@ -4,7 +4,7 @@ from app import app, db, IdentifierType, ObjectType
 def init_identifier_types():
     """Insert default identifier types if not present."""
     defaults = [
-        ("ark", "Archival Resource Key", "https://n2t.net/ark:/83794/<id>"),
+        ("ark", "Archival Resource Key", "https://id.collections.ed.ac.uk/<id>"),
         ("luna", "LUNA Image ID", "https://images.is.ed.ac.uk/luna/servlet/detail/<id>"),
         ("arch", "Archipelago UUID", "https://digital.collections.ed.ac.uk/do/<id>"),
         ("arch_nid", "Archipelago Drupal node ID", "https://digital.collections.ed.ac.uk/node/<id>"),

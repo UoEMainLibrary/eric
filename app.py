@@ -201,7 +201,6 @@ class SyncState(db.Model):
 NAAN = "83794"
 LUNA_IDENTIFIER_RE = re.compile(r"\b[A-Za-z0-9]+~\d+~\d+~\d+~\d+\b")
 BROWSER_SAFE_LONG_SIDE_PIXELS = 1536
-LUNA_MANIFEST_URL_BASE = "https://manifest.collections.ed.ac.uk/v3/luna"
 MANIFEST_URL_BASE = "https://manifest.collections.ed.ac.uk/v3"
 
 def mint_ark():
@@ -433,7 +432,9 @@ def extract_luna_identifier_from_route(route, seen_tokens=None):
 
 def init_identifier_types():
     defaults = [
-        ("ark", "Archival Resource Key", "https://id.collections.ed.ac.uk/ark:/83794/<id>"),
+        # ARK values are stored in full (for example ``ark:/83794/<uuid>``),
+        # so the resolver URL must not add an ARK prefix of its own.
+        ("ark", "Archival Resource Key", "https://id.collections.ed.ac.uk/<id>"),
         ("luna", "LUNA Image ID", "https://images.is.ed.ac.uk/luna/servlet/detail/<id>"),
         ("arch", "Archipelago UUID", "https://digital.collections.ed.ac.uk/do/<id>"),
         ("arch_nid", "Archipelago Drupal node ID", "https://digital.collections.ed.ac.uk/node/<id>"),
@@ -592,10 +593,8 @@ def luna_widget_detail(identifier):
 # ------------------------------------------------------------
 @app.route("/luna/servlet/iiif/m/<identifier>/manifest", strict_slashes=False)
 def luna_manifest(identifier):
-    """Redirect a legacy one-image LUNA manifest URL to its replacement."""
-    identifier = normalise_identifier_value(identifier)
-    fetch_object_for_identifier(identifier)
-    return redirect(f"{LUNA_MANIFEST_URL_BASE}/{identifier}/manifest", code=302)
+    """Resolve a legacy LUNA manifest-shaped image URL to its info document."""
+    return redirect_luna_identifier_to_cantaloupe(identifier, "info.json")
 
 @app.route("/luna/servlet/iiif/<identifier>", strict_slashes=False)
 def luna_iiif_info(identifier):
