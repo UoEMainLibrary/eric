@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy_utils import UUIDType
 from sqlalchemy.orm import joinedload
 from markupsafe import escape
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from datetime import datetime
 import re
 import uuid
@@ -361,31 +361,73 @@ def normalise_book_shelfmark(value):
     """Turn the LUNA BOOK path component (for example ``Ms12``) into ``MS 12``."""
     return re.sub(r"(?<=[A-Za-z])(?=\d)", " ", (value or "").strip()).upper()
 
-def redirect_book_to_manifest(mediafile):
-    parts = mediafile.strip("/").split("/")
-    if len(parts) < 5 or parts[0] != "BOOK":
-        abort(404)
-
-    shelfmark = normalise_book_shelfmark(parts[-2])
+def find_unique_compound_by_shelfmark(shelfmark):
+    """Return the one compound object with this normalised shelfmark, if any."""
     compounds = (
         CompoundObject.query
         .options(joinedload(CompoundObject.object).joinedload(Object.identifiers).joinedload(Identifier.type))
         .filter_by(shelfmark_normalised=shelfmark)
         .all()
     )
-    if len(compounds) != 1:
+    return compounds[0] if len(compounds) == 1 else None
+
+def redirect_compound_to_manifest(compound):
+    ark_ident = get_identifier_by_shortcode(compound.object, "ark")
+    if not ark_ident:
+        abort(404)
+    return redirect(f"{MANIFEST_URL_BASE}/{ark_ident.value}/manifest", code=302)
+
+def redirect_book_to_manifest(mediafile):
+    parts = mediafile.strip("/").split("/")
+    if len(parts) < 5 or parts[0] != "BOOK":
+        abort(404)
+
+    shelfmark = normalise_book_shelfmark(parts[-2])
+    compound = find_unique_compound_by_shelfmark(shelfmark)
+    if not compound:
         app.logger.warning(
             "BOOK reader could not uniquely match shelfmark=%s mediafile=%s matches=%s",
             shelfmark,
             mediafile,
-            len(compounds),
+            CompoundObject.query.filter_by(shelfmark_normalised=shelfmark).count(),
         )
         abort(404)
 
-    ark_ident = get_identifier_by_shortcode(compounds[0].object, "ark")
-    if not ark_ident:
+    return redirect_compound_to_manifest(compound)
+
+def extract_luna_search_shelfmark(target_url):
+    """Extract a quoted shelfmark from a legacy LUNA search URL.
+
+    A LUNA search TinyURL is resolvable only when its sole ``q`` value is a
+    quoted phrase, such as ``q=%22MS%206%22``. Other searches are intentionally
+    left unresolved rather than guessing what the user meant.
+    """
+    parsed = urlparse(target_url)
+    if parsed.path.rstrip("/") != "/luna/servlet/view/search":
+        return None
+
+    query_values = parse_qs(parsed.query).get("q", [])
+    if len(query_values) != 1:
+        return None
+
+    match = re.fullmatch(r'"([^"\r\n]+)"', query_values[0].strip())
+    return normalise_book_shelfmark(match.group(1)) if match else None
+
+def redirect_luna_search_to_manifest(target_url):
+    shelfmark = extract_luna_search_shelfmark(target_url)
+    if not shelfmark:
         abort(404)
-    return redirect(f"{MANIFEST_URL_BASE}/{ark_ident.value}/manifest", code=302)
+
+    compound = find_unique_compound_by_shelfmark(shelfmark)
+    if not compound:
+        app.logger.warning(
+            "LUNA search could not uniquely match shelfmark=%s target_url=%s",
+            shelfmark,
+            target_url,
+        )
+        abort(404)
+
+    return redirect_compound_to_manifest(compound)
 
 def extract_luna_identifier_from_target(target_url):
     parsed = urlparse(target_url)
@@ -633,6 +675,9 @@ def luna_shortlink(token):
     row = LunaRoute.query.filter_by(token=token).first()
     if not row:
         abort(404)
+
+    if row.route_type == "search":
+        return redirect_luna_search_to_manifest(row.target_url)
 
     identifier = extract_luna_identifier_from_route(row, seen_tokens={token})
     if not identifier:
