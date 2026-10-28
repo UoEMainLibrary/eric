@@ -377,6 +377,16 @@ def redirect_compound_to_manifest(compound):
         abort(404)
     return redirect(f"{MANIFEST_URL_BASE}/{ark_ident.value}/manifest", code=302)
 
+def redirect_compound_to_arch(compound):
+    arch_ident = get_identifier_by_shortcode(compound.object, "arch")
+    if not arch_ident:
+        abort(404)
+
+    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.value)
+    if not arch_url:
+        abort(404)
+    return redirect(arch_url, code=302)
+
 def redirect_book_to_manifest(mediafile):
     parts = mediafile.strip("/").split("/")
     if len(parts) < 5 or parts[0] != "BOOK":
@@ -413,7 +423,7 @@ def extract_luna_search_shelfmark(target_url):
     match = re.fullmatch(r'"([^"\r\n]+)"', query_values[0].strip())
     return normalise_book_shelfmark(match.group(1)) if match else None
 
-def redirect_luna_search_to_manifest(target_url):
+def redirect_luna_search_to_arch(target_url):
     shelfmark = extract_luna_search_shelfmark(target_url)
     if not shelfmark:
         abort(404)
@@ -427,7 +437,7 @@ def redirect_luna_search_to_manifest(target_url):
         )
         abort(404)
 
-    return redirect_compound_to_manifest(compound)
+    return redirect_compound_to_arch(compound)
 
 def extract_luna_identifier_from_target(target_url):
     parsed = urlparse(target_url)
@@ -677,7 +687,7 @@ def luna_shortlink(token):
         abort(404)
 
     if row.route_type == "search":
-        return redirect_luna_search_to_manifest(row.target_url)
+        return redirect_luna_search_to_arch(row.target_url)
 
     identifier = extract_luna_identifier_from_route(row, seen_tokens={token})
     if not identifier:
