@@ -57,10 +57,11 @@ python3 scripts/sync_archipelago_collection_items.py
 
 `sync_archipelago_images.py` has its own checkpoint. If a full sweep is
 interrupted, continue it with `--resume`. Image deletion is deliberately not
-part of this job: use the UUID snapshot/prune workflow above. For cron, use
-`--since-last-success` after an initial successful sync has established its
-watermark. The three compound-object jobs are idempotent full sweeps at
-present: rerunning them is safe, but they restart at page one.
+part of this job: use the UUID snapshot/prune workflow above. For incremental
+cron runs, use `--from-snapshot` after a completed image snapshot; it fetches
+only live image UUIDs absent from ERIC. The three compound-object jobs are
+idempotent full sweeps at present: rerunning them is safe, but they restart at
+page one.
 
 ## Important behaviour
 

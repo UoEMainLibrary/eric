@@ -29,8 +29,7 @@ Useful commands:
 - `python3 scripts/sync_archipelago_images.py --dry-run` sweeps Archipelago directly and previews image reconciliation without committing.
 - `python3 scripts/sync_archipelago_images.py --max-pages 1 --dry-run` is the quickest way to time one page of image-sync work.
 - `python3 scripts/sync_archipelago_images.py --resume` continues an interrupted full sync from `data/output/image_sync_checkpoint.json`.
-- `python3 scripts/sync_archipelago_images.py --created-since 2026-06-01 --dry-run` runs a recent-only newest-first sweep based on Archipelago `created`.
-- `python3 scripts/sync_archipelago_images.py --since-last-success --dry-run` previews the next incremental, watermark-based image sync. This mode is intended for cron after an initial successful sync has established a watermark.
+- `python3 scripts/sync_archipelago_images.py --from-snapshot --dry-run` previews reconciliation of only live Archipelago image UUIDs absent from ERIC. It requires a completed `images` snapshot and is the intended incremental cron mode.
 - `python3 scripts/snapshot_archipelago_uuids.py images` creates a resumable,
   file-backed snapshot of the live image UUIDs. Use `--resume` after an
   interrupted run; a completed snapshot must be deliberately replaced with

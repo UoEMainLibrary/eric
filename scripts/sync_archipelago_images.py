@@ -1,18 +1,21 @@
 import argparse
+import hashlib
 import json
 import uuid
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import bootstrap
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import joinedload
 
 from app import app, db, Identifier, IdentifierType, Object, ObjectType, SyncState, mint_ark
-from project_paths import IMAGE_SYNC_CHECKPOINT_JSON
+from project_paths import IMAGE_SYNC_CHECKPOINT_JSON, OUTPUT_DIR
 from scripts.archipelago_sweep import (
     DEFAULT_HTTP_RETRIES,
     DEFAULT_RETRY_BACKOFF,
+    JSON_API_BASE_URL,
+    REQUEST_TIMEOUT,
     build_session,
     canonical_file_identifier,
     extract_cantaloupe_identifier_from_image,
@@ -28,11 +31,87 @@ from scripts.archipelago_sweep import (
 
 MANAGED_IDENTIFIER_SHORTCODES = ("file", "arch", "luna", "cantaloupe")
 SYNC_JOB_NAME = "archipelago_images"
+SNAPSHOT_BATCH_SIZE = 50
 
 
 def utcnow():
     """Return a UTC value suitable for ERIC's naive MariaDB DATETIME columns."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_completed_image_snapshot():
+    directory = OUTPUT_DIR / "archipelago_snapshots"
+    state_path = directory / "images.json"
+    manifest_path = directory / "images.txt"
+    if not state_path.is_file() or not manifest_path.is_file():
+        raise SystemExit(
+            "No completed image snapshot found. Run snapshot_archipelago_uuids.py images first."
+        )
+    with state_path.open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    if state.get("status") != "complete" or state.get("manifest") != str(manifest_path):
+        raise SystemExit("Image snapshot is not complete; refusing snapshot-based sync.")
+    if state.get("manifest_sha256") != sha256(manifest_path):
+        raise SystemExit("Image manifest has changed; refusing snapshot-based sync.")
+    with manifest_path.open(encoding="utf-8") as handle:
+        return {line.strip() for line in handle if line.strip()}, state["manifest_sha256"]
+
+
+def chunked(values, size):
+    values = list(values)
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
+
+
+def existing_image_arch_uuids(live_uuids, arch_identifier_type, image_type):
+    existing = set()
+    for batch in chunked(sorted(live_uuids), 1000):
+        rows = (
+            db.session.query(Identifier.value)
+            .join(Object, Object.id == Identifier.object_id)
+            .filter(Identifier.type_id == arch_identifier_type.id)
+            .filter(Object.type_id == image_type.id)
+            .filter(Identifier.value.in_(batch))
+            .all()
+        )
+        existing.update(value for value, in rows if value)
+    return existing
+
+
+def fetch_source_record_by_uuid(session, source_uuid):
+    response = session.get(
+        f"{JSON_API_BASE_URL}/{source_uuid}",
+        params={"fields[node--digital_object]": "field_descriptive_metadata,created"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    record = response.json().get("data")
+    if not isinstance(record, dict):
+        raise ValueError(f"Archipelago returned no Digital Object for UUID {source_uuid}.")
+    attributes = record.get("attributes") or {}
+    field = attributes.get("field_descriptive_metadata") or {}
+    raw_metadata = field.get("value") if isinstance(field, dict) else None
+    if not isinstance(raw_metadata, str) or not raw_metadata:
+        raise ValueError(f"Archipelago object {source_uuid} has no descriptive metadata.")
+    try:
+        metadata = json.loads(raw_metadata)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Archipelago object {source_uuid} has invalid descriptive metadata.") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Archipelago object {source_uuid} metadata is not an object.")
+    return {
+        "arch": source_uuid,
+        "metadata": metadata,
+        "created": attributes.get("created"),
+    }
 
 
 def normalise_identifier_value(value):
@@ -594,6 +673,80 @@ def process_page_rows(
         db.session.commit()
 
 
+def sync_missing_images_from_snapshot(
+    session,
+    identifier_types,
+    object_types,
+    luna_cache,
+    cantaloupe_cache,
+    counters,
+    verbose,
+    dry_run,
+    arch_uuid_changes,
+):
+    live_uuids, manifest_sha256 = load_completed_image_snapshot()
+    arch_type = identifier_types.get("arch")
+    image_type = object_types.get("Image")
+    if arch_type is None or image_type is None:
+        raise RuntimeError("Missing 'arch' IdentifierType or 'Image' ObjectType.")
+
+    existing_uuids = existing_image_arch_uuids(live_uuids, arch_type, image_type)
+    missing_uuids = sorted(live_uuids - existing_uuids)
+    counters["snapshot_live_uuids"] = len(live_uuids)
+    counters["snapshot_existing_uuids"] = len(existing_uuids)
+    counters["snapshot_missing_uuids"] = len(missing_uuids)
+    log(
+        "Image snapshot diff: "
+        f"live_uuids={len(live_uuids)} existing_uuids={len(existing_uuids)} "
+        f"missing_uuids={len(missing_uuids)}.",
+        verbose,
+    )
+
+    processed_files = set()
+    for batch_number, uuid_batch in enumerate(chunked(missing_uuids, SNAPSHOT_BATCH_SIZE), start=1):
+        source_rows = []
+        for source_uuid in uuid_batch:
+            try:
+                source_rows.append(fetch_source_record_by_uuid(session, source_uuid))
+                counters["snapshot_fetched_objects"] += 1
+            except Exception as exc:
+                counters["errors"] += 1
+                print(f"Error fetching Archipelago UUID {source_uuid}: {exc}")
+
+        page_rows = collect_page_rows(
+            source_rows,
+            session,
+            cantaloupe_cache,
+            counters,
+            verbose,
+            newest_first=True,
+            created_since=None,
+            processed_files=processed_files,
+        )
+        process_page_rows(
+            page_rows,
+            session,
+            luna_cache,
+            identifier_types,
+            object_types,
+            counters,
+            verbose,
+            dry_run=dry_run,
+            load_missing_only=False,
+            arch_uuid_changes=arch_uuid_changes,
+        )
+        log(
+            "Image snapshot sync progress: "
+            f"batches={batch_number} fetched_objects={counters['snapshot_fetched_objects']}/"
+            f"{len(missing_uuids)} swept_images={counters['swept_images']} "
+            f"inserted_objects={counters['inserted_objects']} "
+            f"inserted_arks={counters['inserted_arks']} errors={counters['errors']}.",
+            verbose,
+        )
+
+    return manifest_sha256
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Synchronise Archipelago images into the ERIC database."
@@ -638,33 +791,11 @@ def parse_args():
         help="Path to the JSON checkpoint file used for resumable runs.",
     )
     parser.add_argument(
-        "--newest-first",
-        action="store_true",
-        help="Crawl newest-first instead of oldest-first.",
-    )
-    parser.add_argument(
-        "--created-since",
-        default=None,
-        help=(
-            "Only process Archipelago records created on or after this ISO date/time. "
-            "Best used with newest-first recent sweeps."
-        ),
-    )
-    parser.add_argument(
-        "--since-last-success",
+        "--from-snapshot",
         action="store_true",
         help=(
-            "Use the successful Archipelago image-sync watermark in sync_state. "
-            "Intended for scheduled incremental runs."
-        ),
-    )
-    parser.add_argument(
-        "--overlap-seconds",
-        type=int,
-        default=3600,
-        help=(
-            "When using --since-last-success, rescan this many seconds before "
-            "the saved watermark (default: %(default)s)."
+            "Synchronise only image UUIDs absent from ERIC in a completed, "
+            "checksum-verified Archipelago image snapshot."
         ),
     )
     parser.add_argument(
@@ -698,22 +829,10 @@ def parse_args():
 def main():
     args = parse_args()
     verbose = not args.quiet
-    created_since = parse_source_created_at(args.created_since)
-    if args.created_since and created_since is None:
-        raise SystemExit("--created-since must be a valid ISO date or datetime.")
-    if args.since_last_success and args.created_since:
-        raise SystemExit("Use either --since-last-success or --created-since, not both.")
-    if args.since_last_success and args.resume:
-        raise SystemExit("Do not combine --since-last-success with --resume.")
-    if args.overlap_seconds < 0:
-        raise SystemExit("--overlap-seconds must be zero or greater.")
+    created_since = None
+    if args.from_snapshot and (args.resume or args.start_page is not None or args.start_offset):
+        raise SystemExit("Do not combine --from-snapshot with crawl-resume or start options.")
 
-    if created_since and not args.newest_first:
-        args.newest_first = True
-        log("Enabling newest-first crawl because --created-since was provided.", verbose)
-
-    if args.resume and created_since is not None:
-        raise SystemExit("Do not combine --resume with --created-since.")
     if args.resume and args.start_page is not None:
         raise SystemExit("Do not combine --resume with --start-page.")
     if args.resume and args.start_offset:
@@ -731,31 +850,11 @@ def main():
     )
     luna_cache = {}
     cantaloupe_cache = {}
-    processed_files = set() if args.newest_first else None
+    processed_files = None
 
     with app.app_context():
-        sync_state = None
         sync_started_at = utcnow()
-        if args.since_last_success:
-            sync_state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).first()
-            if sync_state is None or sync_state.last_successful_source_time is None:
-                raise SystemExit(
-                    "No successful image-sync watermark exists. Run an initial "
-                    "--created-since or full sync first."
-                )
-            created_since = sync_state.last_successful_source_time - timedelta(
-                seconds=args.overlap_seconds
-            )
-            args.newest_first = True
-            processed_files = set()
-            log(
-                "Using image-sync watermark "
-                f"{sync_state.last_successful_source_time.isoformat()} with "
-                f"{args.overlap_seconds}s overlap.",
-                verbose,
-            )
-
-        sort = "-created" if args.newest_first else "created"
+        sort = "created"
         page_offset, page_number = load_crawl_checkpoint(
             args.checkpoint,
             args.page_limit,
@@ -789,6 +888,47 @@ def main():
         identifier_types = {row.shortcode: row for row in IdentifierType.query.all()}
         object_types = {row.name: row for row in ObjectType.query.all()}
 
+        if args.from_snapshot:
+            manifest_sha256 = sync_missing_images_from_snapshot(
+                session,
+                identifier_types,
+                object_types,
+                luna_cache,
+                cantaloupe_cache,
+                counters,
+                verbose,
+                args.dry_run,
+                arch_uuid_changes,
+            )
+            if args.dry_run:
+                db.session.rollback()
+                print("Dry run only: rolled back all database changes.")
+            else:
+                state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).first()
+                if state is None:
+                    state = SyncState(job_name=SYNC_JOB_NAME)
+                    db.session.add(state)
+                state.status = "complete" if not counters["errors"] else "failed"
+                state.details_json = json.dumps(
+                    {**dict(sorted(counters.items())), "manifest_sha256": manifest_sha256},
+                    sort_keys=True,
+                )
+                if state.status == "complete":
+                    state.last_successful_source_time = sync_started_at
+                    state.last_completed_at = utcnow()
+                db.session.commit()
+            print(
+                "Image snapshot sync complete. "
+                f"live_uuids={counters['snapshot_live_uuids']} "
+                f"missing_uuids={counters['snapshot_missing_uuids']} "
+                f"fetched_objects={counters['snapshot_fetched_objects']} "
+                f"inserted_objects={counters['inserted_objects']} "
+                f"inserted_arks={counters['inserted_arks']} errors={counters['errors']}"
+            )
+            if not args.dry_run and counters["errors"]:
+                raise SystemExit("Image snapshot sync completed with errors.")
+            return
+
         while True:
             if args.max_pages is not None and pages_processed >= args.max_pages:
                 log(f"Stopping early after {pages_processed} page(s) due to --max-pages.", verbose)
@@ -820,7 +960,7 @@ def main():
                 cantaloupe_cache,
                 counters,
                 verbose,
-                newest_first=args.newest_first,
+                newest_first=False,
                 created_since=created_since,
                 processed_files=processed_files,
             )
@@ -850,10 +990,14 @@ def main():
                     "sort": sort,
                 },
             )
-
-            if created_since is not None and page_has_older_records(raw_objects, created_since):
-                log("Stopping because the crawl has moved past --created-since.", verbose)
-                break
+            log(
+                "Image full-sync progress: "
+                f"pages={pages_processed} swept_images={counters['swept_images']} "
+                f"processed_rows={counters['processed_rows']} "
+                f"inserted_objects={counters['inserted_objects']} "
+                f"inserted_arks={counters['inserted_arks']} errors={counters['errors']}.",
+                verbose,
+            )
 
         if args.dry_run:
             db.session.rollback()
