@@ -30,7 +30,16 @@ Useful commands:
 - `python3 scripts/backfill_from_archipelago.py --max-pages 1 --dry-run` is the quickest way to time one page of DB reconciliation work.
 - `python3 scripts/backfill_from_archipelago.py --resume` continues a long-running backfill from `data/output/backfill_checkpoint.json`.
 - `python3 scripts/backfill_from_archipelago.py --created-since 2026-06-01 --dry-run` runs a recent-only newest-first sweep based on Archipelago `created`.
-- `python3 scripts/backfill_from_archipelago.py --prune-missing-files` also deletes objects whose `file` identifier is no longer present in a known-complete live sweep.
+- Do not use `backfill_from_archipelago.py --prune-missing-files` for routine
+  cleanup: it is filename-based. Use the UUID snapshot/prune workflow below.
+- `python3 scripts/snapshot_archipelago_uuids.py images` creates a resumable,
+  file-backed snapshot of the live image UUIDs. Use `--resume` after an
+  interrupted run; a completed snapshot must be deliberately replaced with
+  `--fresh`.
+- `python3 scripts/prune_archipelago_snapshot.py images` previews image
+  objects whose Archipelago UUID is absent from a completed snapshot. Add
+  `--apply` only after reviewing the report. The equivalent `collections`
+  commands handle Compound Objects.
 - `python3 scripts/ingest_luna_routes.py` loads the MariaDB TinyURL export at
   `data/tinyurls.txt` into `luna_route`. It is safe to re-run: existing tokens
   are updated only when their stored route changes. Use `--dry-run` to verify
