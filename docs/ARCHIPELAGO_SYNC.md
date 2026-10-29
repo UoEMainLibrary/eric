@@ -49,16 +49,18 @@ uses filenames as an identity key and neither changes `luna_route`.
 Then refresh current source data and resolution links:
 
 ```bash
-python3 scripts/backfill_from_archipelago.py
+python3 scripts/sync_archipelago_images.py
 python3 scripts/sync_archipelago_collections.py
 python3 scripts/sync_archipelago_compound_object_catalogue_data.py
 python3 scripts/sync_archipelago_collection_items.py
 ```
 
-`backfill_from_archipelago.py` has its own checkpoint. If it is interrupted,
-continue it with `--resume`; do not combine this with the retired
-`--prune-missing-files` option. The three compound-object jobs are idempotent
-full sweeps at present: rerunning them is safe, but they restart at page one.
+`sync_archipelago_images.py` has its own checkpoint. If a full sweep is
+interrupted, continue it with `--resume`. Image deletion is deliberately not
+part of this job: use the UUID snapshot/prune workflow above. For cron, use
+`--since-last-success` after an initial successful sync has established its
+watermark. The three compound-object jobs are idempotent full sweeps at
+present: rerunning them is safe, but they restart at page one.
 
 ## Important behaviour
 

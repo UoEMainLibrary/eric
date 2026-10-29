@@ -1,14 +1,15 @@
 import argparse
+import json
 import uuid
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import bootstrap
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import joinedload
 
-from app import app, db, Identifier, IdentifierType, Object, ObjectType, mint_ark
-from project_paths import BACKFILL_CHECKPOINT_JSON
+from app import app, db, Identifier, IdentifierType, Object, ObjectType, SyncState, mint_ark
+from project_paths import IMAGE_SYNC_CHECKPOINT_JSON
 from scripts.archipelago_sweep import (
     DEFAULT_HTTP_RETRIES,
     DEFAULT_RETRY_BACKOFF,
@@ -26,6 +27,12 @@ from scripts.archipelago_sweep import (
 
 
 MANAGED_IDENTIFIER_SHORTCODES = ("file", "arch", "luna", "cantaloupe")
+SYNC_JOB_NAME = "archipelago_images"
+
+
+def utcnow():
+    """Return a UTC value suitable for ERIC's naive MariaDB DATETIME columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def normalise_identifier_value(value):
@@ -254,44 +261,6 @@ def ensure_ark_identifier(obj, identifier_types, counters):
     counters["inserted_arks"] += 1
 
 
-def delete_object_and_identifiers(obj, counters):
-    for ident in list(obj.identifiers):
-        db.session.delete(ident)
-        counters["deleted_identifiers"] += 1
-
-    db.session.flush()
-    db.session.delete(obj)
-    counters["deleted_objects"] += 1
-
-
-def prune_missing_files(seen_files, counters):
-    objects = (
-        Object.query
-        .options(joinedload(Object.identifiers).joinedload(Identifier.type))
-        .all()
-    )
-
-    for obj in objects:
-        file_identifiers = [
-            canonical_file_identifier(ident.value).lower()
-            for ident in obj.identifiers
-            if ident.type.shortcode == "file" and ident.value
-        ]
-        if not file_identifiers:
-            continue
-
-        if any(file_value in seen_files for file_value in file_identifiers):
-            continue
-
-        print(
-            "Pruning object "
-            f"object_id={obj.id} file={', '.join(sorted(set(file_identifiers)))} "
-            "because it no longer appears in the live sweep."
-        )
-        delete_object_and_identifiers(obj, counters)
-        counters["pruned_files"] += 1
-
-
 def build_object_index(rows, identifier_types, shortcodes):
     clauses = []
 
@@ -388,7 +357,6 @@ def collect_page_rows(
     verbose,
     newest_first,
     created_since,
-    seen_files,
     processed_files,
 ):
     page_rows_by_file = {}
@@ -427,9 +395,6 @@ def collect_page_rows(
             filename = canonical_file_identifier(source_filename)
             file_key = filename.lower()
             counters["swept_images"] += 1
-
-            if seen_files is not None:
-                seen_files.add(file_key)
 
             if newest_first and processed_files is not None and file_key in processed_files:
                 counters["duplicate_rows"] += 1
@@ -631,7 +596,7 @@ def process_page_rows(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Sweep Archipelago directly and reconcile the ERIC database."
+        description="Synchronise Archipelago images into the ERIC database."
     )
     parser.add_argument(
         "--page-limit",
@@ -653,7 +618,7 @@ def parse_args():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume from the saved backfill checkpoint.",
+        help="Resume from the saved image-sync checkpoint.",
     )
     parser.add_argument(
         "--start-offset",
@@ -669,16 +634,8 @@ def parse_args():
     )
     parser.add_argument(
         "--checkpoint",
-        default=str(BACKFILL_CHECKPOINT_JSON),
+        default=str(IMAGE_SYNC_CHECKPOINT_JSON),
         help="Path to the JSON checkpoint file used for resumable runs.",
-    )
-    parser.add_argument(
-        "--prune-missing-files",
-        action="store_true",
-        help=(
-            "Delete objects whose file identifier no longer appears in the live sweep. "
-            "Use this only with a known-complete run."
-        ),
     )
     parser.add_argument(
         "--newest-first",
@@ -691,6 +648,23 @@ def parse_args():
         help=(
             "Only process Archipelago records created on or after this ISO date/time. "
             "Best used with newest-first recent sweeps."
+        ),
+    )
+    parser.add_argument(
+        "--since-last-success",
+        action="store_true",
+        help=(
+            "Use the successful Archipelago image-sync watermark in sync_state. "
+            "Intended for scheduled incremental runs."
+        ),
+    )
+    parser.add_argument(
+        "--overlap-seconds",
+        type=int,
+        default=3600,
+        help=(
+            "When using --since-last-success, rescan this many seconds before "
+            "the saved watermark (default: %(default)s)."
         ),
     )
     parser.add_argument(
@@ -727,15 +701,17 @@ def main():
     created_since = parse_source_created_at(args.created_since)
     if args.created_since and created_since is None:
         raise SystemExit("--created-since must be a valid ISO date or datetime.")
+    if args.since_last_success and args.created_since:
+        raise SystemExit("Use either --since-last-success or --created-since, not both.")
+    if args.since_last_success and args.resume:
+        raise SystemExit("Do not combine --since-last-success with --resume.")
+    if args.overlap_seconds < 0:
+        raise SystemExit("--overlap-seconds must be zero or greater.")
 
     if created_since and not args.newest_first:
         args.newest_first = True
         log("Enabling newest-first crawl because --created-since was provided.", verbose)
 
-    if args.prune_missing_files and args.max_pages is not None:
-        raise SystemExit("Do not combine --prune-missing-files with --max-pages.")
-    if args.prune_missing_files and created_since is not None:
-        raise SystemExit("Do not combine --prune-missing-files with --created-since.")
     if args.resume and created_since is not None:
         raise SystemExit("Do not combine --resume with --created-since.")
     if args.resume and args.start_page is not None:
@@ -749,43 +725,64 @@ def main():
     if args.start_offset < 0:
         raise SystemExit("--start-offset must be 0 or greater.")
 
-    sort = "-created" if args.newest_first else "created"
     session = build_session(
         http_retries=args.http_retries,
         retry_backoff=args.retry_backoff,
     )
     luna_cache = {}
     cantaloupe_cache = {}
-    seen_files = set() if args.prune_missing_files else None
     processed_files = set() if args.newest_first else None
-    page_offset, page_number = load_crawl_checkpoint(
-        args.checkpoint,
-        args.page_limit,
-        args.resume,
-        sort=sort,
-    )
-    if not args.resume:
-        if args.start_page is not None:
-            page_number = args.start_page - 1
-            page_offset = (args.start_page - 1) * args.page_limit
-        else:
-            page_offset = args.start_offset
-            page_number = page_offset // args.page_limit if args.page_limit else 0
-
-    if args.resume and (page_offset or page_number):
-        log(
-            f"Resuming backfill crawl from page {page_number + 1} "
-            f"(offset={page_offset}, sort={sort}).",
-            verbose,
-        )
-    elif page_offset or page_number:
-        log(
-            f"Starting backfill crawl at page {page_number + 1} "
-            f"(offset={page_offset}, sort={sort}).",
-            verbose,
-        )
 
     with app.app_context():
+        sync_state = None
+        sync_started_at = utcnow()
+        if args.since_last_success:
+            sync_state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).first()
+            if sync_state is None or sync_state.last_successful_source_time is None:
+                raise SystemExit(
+                    "No successful image-sync watermark exists. Run an initial "
+                    "--created-since or full sync first."
+                )
+            created_since = sync_state.last_successful_source_time - timedelta(
+                seconds=args.overlap_seconds
+            )
+            args.newest_first = True
+            processed_files = set()
+            log(
+                "Using image-sync watermark "
+                f"{sync_state.last_successful_source_time.isoformat()} with "
+                f"{args.overlap_seconds}s overlap.",
+                verbose,
+            )
+
+        sort = "-created" if args.newest_first else "created"
+        page_offset, page_number = load_crawl_checkpoint(
+            args.checkpoint,
+            args.page_limit,
+            args.resume,
+            sort=sort,
+        )
+        if not args.resume:
+            if args.start_page is not None:
+                page_number = args.start_page - 1
+                page_offset = (args.start_page - 1) * args.page_limit
+            else:
+                page_offset = args.start_offset
+                page_number = page_offset // args.page_limit if args.page_limit else 0
+
+        if args.resume and (page_offset or page_number):
+            log(
+                f"Resuming image-sync crawl from page {page_number + 1} "
+                f"(offset={page_offset}, sort={sort}).",
+                verbose,
+            )
+        elif page_offset or page_number:
+            log(
+                f"Starting image-sync crawl at page {page_number + 1} "
+                f"(offset={page_offset}, sort={sort}).",
+                verbose,
+            )
+
         counters = Counter()
         arch_uuid_changes = []
         pages_processed = 0
@@ -825,7 +822,6 @@ def main():
                 verbose,
                 newest_first=args.newest_first,
                 created_since=created_since,
-                seen_files=seen_files,
                 processed_files=processed_files,
             )
             process_page_rows(
@@ -859,22 +855,25 @@ def main():
                 log("Stopping because the crawl has moved past --created-since.", verbose)
                 break
 
-        if args.prune_missing_files:
-            savepoint = db.session.begin_nested()
-            try:
-                prune_missing_files(seen_files or set(), counters)
-                db.session.flush()
-                savepoint.commit()
-                if not args.dry_run:
-                    db.session.commit()
-            except Exception as exc:
-                savepoint.rollback()
-                counters["errors"] += 1
-                print(f"Error while pruning files missing from the sweep: {exc}")
-
         if args.dry_run:
             db.session.rollback()
             print("Dry run only: rolled back all database changes.")
+        else:
+            sync_state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).first()
+            if sync_state is None:
+                sync_state = SyncState(job_name=SYNC_JOB_NAME)
+                db.session.add(sync_state)
+            if args.max_pages is not None:
+                sync_state.status = "partial"
+            elif counters["errors"]:
+                sync_state.status = "failed"
+            else:
+                sync_state.status = "complete"
+            sync_state.details_json = json.dumps(dict(sorted(counters.items())), sort_keys=True)
+            if sync_state.status == "complete":
+                sync_state.last_successful_source_time = sync_started_at
+                sync_state.last_completed_at = utcnow()
+            db.session.commit()
 
         if arch_uuid_changes:
             print(
@@ -890,7 +889,7 @@ def main():
                 )
 
         print(
-            "Backfill sync complete. "
+            "Image sync complete. "
             f"swept_images={counters['swept_images']} "
             f"processed_rows={counters['processed_rows']} "
             f"inserted_objects={counters['inserted_objects']} "
@@ -900,7 +899,6 @@ def main():
             f"inserted_arks={counters['inserted_arks']} "
             f"deleted_identifiers={counters['deleted_identifiers']} "
             f"deleted_objects={counters['deleted_objects']} "
-            f"pruned_files={counters['pruned_files']} "
             f"duplicate_rows={counters['duplicate_rows']} "
             f"reused_luna={counters['reused_luna']} "
             f"queried_luna={counters['queried_luna']} "
@@ -911,6 +909,8 @@ def main():
             f"changed_arch_uuids={counters['changed_arch_uuids']} "
             f"errors={counters['errors']}"
         )
+        if not args.dry_run and counters["errors"]:
+            raise SystemExit("Image sync completed with errors; watermark was not advanced.")
 
 
 if __name__ == "__main__":

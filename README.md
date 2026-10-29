@@ -26,12 +26,11 @@ Useful commands:
 - `python3 scripts/get_data.py --clear-csvs --resume` clears the generated export CSVs but keeps the crawl checkpoint, so the next batch starts where the previous crawl left off.
 - `python3 scripts/get_data.py --fresh` clears the generated export CSVs and checkpoint before starting a new crawl from the beginning.
 - `python3 scripts/ingest_csv.py` is safe to rerun; it reuses existing objects and only fills in missing identifiers, dimensions, and ARKs.
-- `python3 scripts/backfill_from_archipelago.py --dry-run` sweeps Archipelago directly and previews the database reconciliation without committing.
-- `python3 scripts/backfill_from_archipelago.py --max-pages 1 --dry-run` is the quickest way to time one page of DB reconciliation work.
-- `python3 scripts/backfill_from_archipelago.py --resume` continues a long-running backfill from `data/output/backfill_checkpoint.json`.
-- `python3 scripts/backfill_from_archipelago.py --created-since 2026-06-01 --dry-run` runs a recent-only newest-first sweep based on Archipelago `created`.
-- Do not use `backfill_from_archipelago.py --prune-missing-files` for routine
-  cleanup: it is filename-based. Use the UUID snapshot/prune workflow below.
+- `python3 scripts/sync_archipelago_images.py --dry-run` sweeps Archipelago directly and previews image reconciliation without committing.
+- `python3 scripts/sync_archipelago_images.py --max-pages 1 --dry-run` is the quickest way to time one page of image-sync work.
+- `python3 scripts/sync_archipelago_images.py --resume` continues an interrupted full sync from `data/output/image_sync_checkpoint.json`.
+- `python3 scripts/sync_archipelago_images.py --created-since 2026-06-01 --dry-run` runs a recent-only newest-first sweep based on Archipelago `created`.
+- `python3 scripts/sync_archipelago_images.py --since-last-success --dry-run` previews the next incremental, watermark-based image sync. This mode is intended for cron after an initial successful sync has established a watermark.
 - `python3 scripts/snapshot_archipelago_uuids.py images` creates a resumable,
   file-backed snapshot of the live image UUIDs. Use `--resume` after an
   interrupted run; a completed snapshot must be deliberately replaced with
