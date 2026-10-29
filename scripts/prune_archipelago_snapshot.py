@@ -106,9 +106,13 @@ def candidates_for_collections(live_uuids, arch_identifier_type):
 
 
 def delete_image(obj):
+    # The candidate query has already loaded ``obj.identifiers``.  Do not mix
+    # bulk-deleting those rows with ``session.delete(obj)``: SQLAlchemy would
+    # otherwise try to flush the stale, loaded Identifier instances while
+    # deleting the parent Object.
     CompoundObjectItem.query.filter_by(object_id=obj.id).delete(synchronize_session=False)
     Identifier.query.filter_by(object_id=obj.id).delete(synchronize_session=False)
-    db.session.delete(obj)
+    Object.query.filter_by(id=obj.id).delete(synchronize_session=False)
 
 
 def delete_compound(compound):
@@ -117,8 +121,11 @@ def delete_compound(compound):
         synchronize_session=False
     )
     Identifier.query.filter_by(object_id=compound.object_id).delete(synchronize_session=False)
-    db.session.delete(compound)
-    db.session.delete(compound.object)
+    # As above, keep this entirely in the bulk-delete path so that relationships
+    # loaded while finding candidates cannot be autoflushed after their rows
+    # have been removed.
+    CompoundObject.query.filter_by(id=compound.id).delete(synchronize_session=False)
+    Object.query.filter_by(id=compound.object_id).delete(synchronize_session=False)
 
 
 def main():

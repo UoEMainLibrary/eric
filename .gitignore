@@ -138,6 +138,7 @@ config.py
 data/logs/
 data/output/get_data_checkpoint.json
 data/output/missing_luna_records.csv
+data/output/archipelago_snapshots
 data/db/*.db
 
 *.csv
