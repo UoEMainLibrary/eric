@@ -31,6 +31,7 @@ from scripts.archipelago_sweep import (
 
 MANAGED_IDENTIFIER_SHORTCODES = ("file", "arch", "luna", "cantaloupe")
 SYNC_JOB_NAME = "archipelago_images"
+CHANGED_SYNC_JOB_NAME = "archipelago_images_changed"
 SNAPSHOT_BATCH_SIZE = 50
 
 
@@ -167,6 +168,45 @@ def parse_source_created_at(value):
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
+
+
+def parse_changed_since(value):
+    parsed = parse_source_created_at(value)
+    if parsed is None:
+        raise SystemExit("--changed-since must be an ISO-8601 timestamp or YYYY-MM-DD.")
+    return parsed
+
+
+def source_rows_changed_since(source_rows, changed_since):
+    return [
+        row for row in source_rows
+        if (changed := parse_source_created_at(row.get("changed"))) is not None
+        and changed >= changed_since
+    ]
+
+
+def source_page_is_older_than(raw_objects, changed_since):
+    """True only when a newest-first page is entirely before the watermark."""
+    changed_values = [
+        parse_source_created_at((obj.get("attributes") or {}).get("changed"))
+        for obj in raw_objects
+        if isinstance(obj, dict)
+    ]
+    return bool(changed_values) and all(
+        changed is not None and changed < changed_since for changed in changed_values
+    )
+
+
+def report_attention(counters):
+    fields = (
+        "errors",
+        "missing_cantaloupe_rows",
+        "missing_luna_rows",
+        "changed_arch_uuids",
+    )
+    details = [f"{field}={counters[field]}" for field in fields if counters[field]]
+    if details:
+        print("ATTENTION: Image sync needs review: " + " ".join(details))
 
 
 def preferred_primary_id(row):
@@ -909,6 +949,21 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--changed-since",
+        help=(
+            "Reconcile objects changed at or after this ISO-8601 timestamp, "
+            "using Archipelago's newest-first changed sort."
+        ),
+    )
+    parser.add_argument(
+        "--since-last-success",
+        action="store_true",
+        help=(
+            "Use the successful changed-sync watermark. The first changed sync "
+            "must use --changed-since."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Calculate and print the changes, then roll them back instead of committing.",
@@ -941,9 +996,14 @@ def main():
     verbose = not args.quiet
     created_since = None
     snapshot_mode = args.from_snapshot or args.repair_missing_cantaloupe_from_snapshot
+    if args.changed_since and args.since_last_success:
+        raise SystemExit("Use only one of --changed-since and --since-last-success.")
     if args.from_snapshot and args.repair_missing_cantaloupe_from_snapshot:
         raise SystemExit("Use only one snapshot sync mode at a time.")
-    if snapshot_mode and (args.resume or args.start_page is not None or args.start_offset):
+    changed_mode = bool(args.changed_since or args.since_last_success)
+    if snapshot_mode and changed_mode:
+        raise SystemExit("Do not combine a snapshot mode with a changed-sync mode.")
+    if (snapshot_mode or changed_mode) and (args.resume or args.start_page is not None or args.start_offset):
         raise SystemExit("Do not combine a snapshot mode with crawl-resume or start options.")
 
     if args.resume and args.start_page is not None:
@@ -967,7 +1027,25 @@ def main():
 
     with app.app_context():
         sync_started_at = utcnow()
-        sort = "created"
+        changed_since = None
+        if changed_mode:
+            changed_state = SyncState.query.filter_by(job_name=CHANGED_SYNC_JOB_NAME).first()
+            if args.since_last_success:
+                if changed_state is None or changed_state.last_successful_source_time is None:
+                    raise SystemExit(
+                        "No successful changed-sync watermark exists; use --changed-since first."
+                    )
+                changed_since = changed_state.last_successful_source_time
+            else:
+                changed_since = parse_changed_since(args.changed_since)
+            sort = "-changed"
+            log(
+                "Running changed-image sync from watermark "
+                f"{changed_since.isoformat(sep=' ')} (inclusive).",
+                verbose,
+            )
+        else:
+            sort = "created"
         page_offset, page_number = load_crawl_checkpoint(
             args.checkpoint,
             args.page_limit,
@@ -1053,6 +1131,7 @@ def main():
                     f"inserted_objects={counters['inserted_objects']} "
                     f"inserted_arks={counters['inserted_arks']} errors={counters['errors']}"
                 )
+            report_attention(counters)
             if not args.dry_run and counters["errors"]:
                 raise SystemExit("Image snapshot sync completed with errors.")
             return
@@ -1083,7 +1162,8 @@ def main():
                 break
 
             page_rows = collect_page_rows(
-                source_rows,
+                source_rows_changed_since(source_rows, changed_since)
+                if changed_mode else source_rows,
                 session,
                 cantaloupe_cache,
                 counters,
@@ -1119,7 +1199,7 @@ def main():
                 },
             )
             log(
-                "Image full-sync progress: "
+                f"Image {'changed' if changed_mode else 'full'}-sync progress: "
                 f"pages={pages_processed} swept_images={counters['swept_images']} "
                 f"processed_rows={counters['processed_rows']} "
                 f"inserted_objects={counters['inserted_objects']} "
@@ -1127,13 +1207,21 @@ def main():
                 verbose,
             )
 
+            if changed_mode and source_page_is_older_than(raw_objects, changed_since):
+                log(
+                    "Reached a JSON:API page entirely older than the changed-sync watermark.",
+                    verbose,
+                )
+                break
+
         if args.dry_run:
             db.session.rollback()
             print("Dry run only: rolled back all database changes.")
         else:
-            sync_state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).first()
+            sync_job_name = CHANGED_SYNC_JOB_NAME if changed_mode else SYNC_JOB_NAME
+            sync_state = SyncState.query.filter_by(job_name=sync_job_name).first()
             if sync_state is None:
-                sync_state = SyncState(job_name=SYNC_JOB_NAME)
+                sync_state = SyncState(job_name=sync_job_name)
                 db.session.add(sync_state)
             if args.max_pages is not None:
                 sync_state.status = "partial"
@@ -1161,7 +1249,7 @@ def main():
                 )
 
         print(
-            "Image sync complete. "
+            f"Image {'changed' if changed_mode else 'full'} sync complete. "
             f"swept_images={counters['swept_images']} "
             f"processed_rows={counters['processed_rows']} "
             f"inserted_objects={counters['inserted_objects']} "
@@ -1181,6 +1269,7 @@ def main():
             f"changed_arch_uuids={counters['changed_arch_uuids']} "
             f"errors={counters['errors']}"
         )
+        report_attention(counters)
         if not args.dry_run and counters["errors"]:
             raise SystemExit("Image sync completed with errors; watermark was not advanced.")
 

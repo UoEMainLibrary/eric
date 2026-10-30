@@ -110,7 +110,7 @@ def fetch_source_page(session, page_offset, page_limit, sort=JSON_API_SORT, verb
     )
     url = (
         f"{JSON_API_BASE_URL}"
-        f"?fields[node--digital_object]=field_descriptive_metadata,created"
+        f"?fields[node--digital_object]=field_descriptive_metadata,created,changed"
         f"&sort={sort}"
         f"&page[limit]={page_limit}"
         f"&page[offset]={page_offset}"
@@ -125,6 +125,7 @@ def fetch_source_page(session, page_offset, page_limit, sort=JSON_API_SORT, verb
     for obj in objects:
         node_uuid = obj["id"]
         created = obj.get("attributes", {}).get("created")
+        changed = obj.get("attributes", {}).get("changed")
         field_value = (
             obj["attributes"]
             .get("field_descriptive_metadata", {})
@@ -144,6 +145,7 @@ def fetch_source_page(session, page_offset, page_limit, sort=JSON_API_SORT, verb
                 "arch": node_uuid,
                 "metadata": metadata,
                 "created": created,
+                "changed": changed,
             }
         )
 

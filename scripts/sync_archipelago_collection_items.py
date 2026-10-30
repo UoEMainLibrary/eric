@@ -33,6 +33,7 @@ from scripts.archipelago_sweep import (
 
 DEFAULT_JSONAPI_ROOT = "http://lac-dams-live2.is.ed.ac.uk/jsonapi"
 SYNC_JOB_NAME = "archipelago_compound_object_items"
+CHANGED_SYNC_JOB_NAME = "archipelago_compound_object_items_changed"
 PARENT_KEY_CANDIDATES = (
     "ispartof",
     "is_part_of",
@@ -56,6 +57,15 @@ def parse_args():
     parser.add_argument("--timeout", type=int, default=REQUEST_TIMEOUT)
     parser.add_argument("--http-retries", type=int, default=DEFAULT_HTTP_RETRIES)
     parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF)
+    parser.add_argument(
+        "--changed-since",
+        help="Process objects changed at or after this ISO-8601 timestamp.",
+    )
+    parser.add_argument(
+        "--since-last-success",
+        action="store_true",
+        help="Use the successful changed-membership-sync watermark.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     return parser.parse_args()
@@ -63,6 +73,30 @@ def parse_args():
 
 def utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def parse_changed_since(value):
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit("--changed-since must be an ISO-8601 timestamp or YYYY-MM-DD.")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SystemExit("--changed-since must be an ISO-8601 timestamp or YYYY-MM-DD.") from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def changed_at(record):
+    attributes = record.get("attributes") or {}
+    value = attributes.get("changed")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
 
 
 def normalise_key(value):
@@ -139,13 +173,15 @@ def extract_label(attributes, metadata):
     return str(attributes.get("title") or "").strip()
 
 
-def iter_digital_objects(session, jsonapi_root, page_limit, max_pages, timeout, verbose):
+def iter_digital_objects(
+    session, jsonapi_root, page_limit, max_pages, timeout, verbose, changed_since=None
+):
     endpoint = f"{jsonapi_root.rstrip('/')}/node/digital_object"
     resource_type = "node--digital_object"
     query = urlencode(
         {
-            f"fields[{resource_type}]": "drupal_internal__nid,title,field_descriptive_metadata",
-            "sort": "drupal_internal__nid",
+            f"fields[{resource_type}]": "drupal_internal__nid,title,field_descriptive_metadata,changed",
+            "sort": "-changed" if changed_since else "drupal_internal__nid",
             "page[limit]": page_limit,
         }
     )
@@ -160,8 +196,21 @@ def iter_digital_objects(session, jsonapi_root, page_limit, max_pages, timeout, 
         response = session.get(next_url, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
-        records = [item for item in payload.get("data", []) if isinstance(item, dict)]
+        raw_records = [item for item in payload.get("data", []) if isinstance(item, dict)]
+        records = (
+            [record for record in raw_records if (record_changed := changed_at(record)) is not None
+             and record_changed >= changed_since]
+            if changed_since else raw_records
+        )
         yield page_number, records
+
+        if changed_since and raw_records and all(
+            (record_changed := changed_at(record)) is not None
+            and record_changed < changed_since
+            for record in raw_records
+        ):
+            log("Reached a page entirely older than the changed-membership watermark.", verbose)
+            return
 
         next_link = payload.get("links", {}).get("next", {})
         href = next_link.get("href") if isinstance(next_link, dict) else None
@@ -333,6 +382,9 @@ def main():
     args = parse_args()
     if args.page_limit < 1:
         raise SystemExit("--page-limit must be at least 1")
+    if args.changed_since and args.since_last_success:
+        raise SystemExit("Use only one of --changed-since and --since-last-success.")
+    changed_mode = bool(args.changed_since or args.since_last_success)
 
     verbose = not args.quiet
     session = build_session(
@@ -341,6 +393,24 @@ def main():
     )
 
     with app.app_context():
+        sync_started_at = utcnow()
+        state_job_name = CHANGED_SYNC_JOB_NAME if changed_mode else SYNC_JOB_NAME
+        changed_since = None
+        if changed_mode:
+            changed_state = SyncState.query.filter_by(job_name=CHANGED_SYNC_JOB_NAME).first()
+            if args.since_last_success:
+                if changed_state is None or changed_state.last_successful_source_time is None:
+                    raise SystemExit(
+                        "No successful changed-membership watermark exists; use --changed-since first."
+                    )
+                changed_since = changed_state.last_successful_source_time
+            else:
+                changed_since = parse_changed_since(args.changed_since)
+            log(
+                "Running changed-membership sync from watermark "
+                f"{changed_since.isoformat(sep=' ')} (inclusive).",
+                verbose,
+            )
         arch_type = IdentifierType.query.filter_by(shortcode="arch").first()
         arch_nid_type = IdentifierType.query.filter_by(shortcode="arch_nid").first()
         if arch_type is None or arch_nid_type is None:
@@ -349,9 +419,9 @@ def main():
         compound_objects_by_nid = load_compound_objects_by_arch_nid(arch_nid_type)
         arch_nid_owners = load_arch_nid_owners(arch_nid_type)
         counters = Counter()
-        state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).first()
+        state = SyncState.query.filter_by(job_name=state_job_name).first()
         if state is None:
-            state = SyncState(job_name=SYNC_JOB_NAME)
+            state = SyncState(job_name=state_job_name)
             db.session.add(state)
 
         if not args.dry_run:
@@ -367,6 +437,7 @@ def main():
                 args.max_pages,
                 args.timeout,
                 verbose,
+                changed_since=changed_since,
             ):
                 counters["pages"] += 1
                 try:
@@ -386,18 +457,20 @@ def main():
                 db.session.rollback()
                 print("Dry run only: rolled back all database changes.")
             else:
-                state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).one()
+                state = SyncState.query.filter_by(job_name=state_job_name).one()
                 state.status = "partial" if args.max_pages is not None else "complete"
                 if args.max_pages is None:
                     state.last_completed_at = utcnow()
+                    if changed_mode:
+                        state.last_successful_source_time = sync_started_at
                 state.details_json = state_details(counters)
                 db.session.commit()
         except Exception as exc:
             db.session.rollback()
             if not args.dry_run:
-                state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).first()
+                state = SyncState.query.filter_by(job_name=state_job_name).first()
                 if state is None:
-                    state = SyncState(job_name=SYNC_JOB_NAME)
+                    state = SyncState(job_name=state_job_name)
                     db.session.add(state)
                 state.status = "failed"
                 counters["fatal_errors"] += 1
@@ -406,7 +479,7 @@ def main():
             raise SystemExit(f"Compound-object-item sync failed: {exc}") from exc
 
         print(
-            "Compound-object-item sync complete. "
+            f"Compound-object-item {'changed ' if changed_mode else ''}sync complete. "
             f"pages={counters['pages']} "
             f"processed_digital_objects={counters['processed_digital_objects']} "
             f"created_compound_object_items={counters['created_compound_object_items']} "
@@ -418,6 +491,18 @@ def main():
             f"record_errors={counters['record_errors']} "
             f"page_errors={counters['page_errors']}"
         )
+        attention_fields = (
+            "missing_eric_objects",
+            "missing_compound_objects",
+            "arch_nid_conflicts",
+            "record_errors",
+            "page_errors",
+        )
+        attention = [
+            f"{field}={counters[field]}" for field in attention_fields if counters[field]
+        ]
+        if attention:
+            print("ATTENTION: Compound-object membership sync needs review: " + " ".join(attention))
 
 
 if __name__ == "__main__":

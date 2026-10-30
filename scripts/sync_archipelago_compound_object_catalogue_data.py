@@ -322,6 +322,17 @@ def main():
             f"unclassified_domains={counters['unclassified_domains']} "
             f"missing_source_ids={counters['missing_source_ids']} errors={counters['errors']}"
         )
+        attention_fields = (
+            "missing_compound_objects",
+            "unclassified_domains",
+            "missing_source_ids",
+            "errors",
+        )
+        attention = [
+            f"{field}={counters[field]}" for field in attention_fields if counters[field]
+        ]
+        if attention:
+            print("ATTENTION: Compound-object catalogue sync needs review: " + " ".join(attention))
 
 
 if __name__ == "__main__":

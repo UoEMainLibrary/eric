@@ -72,6 +72,45 @@ python3 scripts/sync_archipelago_images.py --repair-missing-cantaloupe-from-snap
 python3 scripts/sync_archipelago_images.py --repair-missing-cantaloupe-from-snapshot
 ```
 
+## Scheduled runs
+
+`scripts/run_archipelago_sync.sh --full` runs the complete safe sequence:
+fresh image and collection UUID snapshots, UUID-based pruning, image
+reconciliation, collection reconciliation, catalogue enrichment, and
+compound-object membership reconciliation. It stops at the first failing
+command, keeps an exclusive lock, and appends UTC start, finish, and
+elapsed-time entries to `data/logs/archipelago_sync.log`.
+
+`--incremental` pages newest-first by Archipelago's working `changed` field,
+then stops locally once it reaches the last successful changed-sync watermark.
+It reconciles changed images and memberships, while still doing the small
+collection and catalogue sweeps. It does not prune: reserve `--full` for the
+periodic health run.
+
+Before the first incremental run, establish each changed-sync watermark with
+an explicitly chosen safe starting point:
+
+```bash
+python3 scripts/sync_archipelago_images.py --changed-since 2026-08-01
+python3 scripts/sync_archipelago_collection_items.py --changed-since 2026-08-01
+```
+
+For example, run the lightweight incremental job nightly and the authoritative
+snapshot/prune health run weekly:
+
+```cron
+15 1 * * 1-6 /apps/www/eric/scripts/run_archipelago_sync.sh --incremental
+15 1 * * 0 /apps/www/eric/scripts/run_archipelago_sync.sh --full
+```
+
+Do not schedule its individual constituent commands separately.
+
+After a run, review the prominent exceptions with:
+
+```bash
+grep -E 'ATTENTION:|RUN_FAILED|Skipping |Warning:' data/logs/archipelago_sync.log
+```
+
 ## Important behaviour
 
 - A replacement upload with a new Archipelago UUID is a new ERIC object. The

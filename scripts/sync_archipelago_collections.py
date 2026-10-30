@@ -403,6 +403,11 @@ def main():
             f"created_identifiers={counters['created_identifiers']} "
             f"errors={counters['errors']}"
         )
+        if counters["errors"]:
+            print(
+                "ATTENTION: Compound-object collection sync needs review: "
+                f"errors={counters['errors']}"
+            )
 
 
 if __name__ == "__main__":
