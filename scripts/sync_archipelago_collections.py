@@ -290,7 +290,7 @@ def sync_record(record, collection_type, identifier_types, counters):
         if compound_object:
             counters["matched_shelfmark"] += 1
         else:
-            compound_object = create_compound_object(compound_object_type, identifier_types, counters)
+            compound_object = create_compound_object(collection_type, identifier_types, counters)
 
     collection_object = compound_object.object
     source_identifier = ensure_identifier(
