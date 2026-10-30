@@ -32,16 +32,16 @@ DEFAULT_RETRY_BACKOFF = 1.0
 LUNA_IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z0-9]+~\d+~\d+~\d+~\d+\b")
 IIIF_INFO_PATTERN = re.compile(r'data-iiif-infojson="([^"]*/iiif/2/([^"]+)/info\.json)"')
 IIIF_FILENAME_PATTERN = re.compile(
-    r"image-([^.\/]+)-[0-9a-fA-F-]+\.tif$",
+    r"image-([^.\/]+)-[0-9a-fA-F-]+\.(tif|jpg|jpeg)$",
     re.IGNORECASE,
 )
 IIIF_ID_IN_URL_PATTERN = re.compile(r"/iiif/2/([^/]+)/")
 CANTALOUPE_ID_PATTERN = re.compile(
-    r"([0-9a-z]{3}%2Fimage-[^\"'&?\s]+\.tif)",
+    r"([0-9a-z]{3}%2Fimage-[^\"'&?\s]+\.(?:tif|jpg|jpeg))",
     re.IGNORECASE,
 )
 CANTALOUPE_DECODED_PATTERN = re.compile(
-    r"([0-9a-z]{3})/((?:image)-[^\"'&?\s]+\.tif)",
+    r"([0-9a-z]{3})/((?:image)-[^\"'&?\s]+\.(?:tif|jpg|jpeg))",
     re.IGNORECASE,
 )
 
@@ -434,7 +434,9 @@ def fetch_cantaloupe_data(session, arch_uuid, cache, verbose=True):
         filename_match = IIIF_FILENAME_PATTERN.search(unquote(cantaloupe_id))
         if not filename_match:
             continue
-        mapping[f"{filename_match.group(1)}.tif"] = {
+        mapping[
+            f"{filename_match.group(1)}.{filename_match.group(2).lower()}"
+        ] = {
             "cantaloupe": cantaloupe_id,
         }
 

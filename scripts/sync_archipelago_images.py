@@ -86,6 +86,38 @@ def existing_image_arch_uuids(live_uuids, arch_identifier_type, image_type):
     return existing
 
 
+def image_objects_by_arch_uuid(live_uuids, arch_identifier_type, image_type):
+    """Return live Archipelago UUIDs mapped to their ERIC Image object IDs."""
+    objects_by_uuid = {}
+    for batch in chunked(sorted(live_uuids), 1000):
+        rows = (
+            db.session.query(Identifier.value, Object.id)
+            .join(Object, Object.id == Identifier.object_id)
+            .filter(Identifier.type_id == arch_identifier_type.id)
+            .filter(Object.type_id == image_type.id)
+            .filter(Identifier.value.in_(batch))
+            .all()
+        )
+        objects_by_uuid.update({value: object_id for value, object_id in rows if value})
+    return objects_by_uuid
+
+
+def object_ids_with_identifier_type(object_ids, identifier_type):
+    """Return the supplied object IDs which already have this identifier type."""
+    found = set()
+    for batch in chunked(sorted(object_ids), 1000):
+        found.update(
+            object_id
+            for object_id, in (
+                db.session.query(Identifier.object_id)
+                .filter(Identifier.type_id == identifier_type.id)
+                .filter(Identifier.object_id.in_(batch))
+                .all()
+            )
+        )
+    return found
+
+
 def fetch_source_record_by_uuid(session, source_uuid):
     response = session.get(
         f"{JSON_API_BASE_URL}/{source_uuid}",
@@ -747,6 +779,76 @@ def sync_missing_images_from_snapshot(
     return manifest_sha256
 
 
+def repair_missing_cantaloupe_from_snapshot(
+    session,
+    identifier_types,
+    object_types,
+    luna_cache,
+    cantaloupe_cache,
+    counters,
+    verbose,
+    dry_run,
+    arch_uuid_changes,
+):
+    """Fill Cantaloupe IDs only for live images which do not yet have one."""
+    live_uuids, manifest_sha256 = load_completed_image_snapshot()
+    arch_type = identifier_types.get("arch")
+    image_type = object_types.get("Image")
+    cantaloupe_type = identifier_types.get("cantaloupe")
+    if arch_type is None or image_type is None or cantaloupe_type is None:
+        raise RuntimeError("Missing 'arch'/'cantaloupe' IdentifierType or 'Image' ObjectType.")
+
+    objects_by_uuid = image_objects_by_arch_uuid(live_uuids, arch_type, image_type)
+    object_ids_with_cantaloupe = object_ids_with_identifier_type(
+        set(objects_by_uuid.values()), cantaloupe_type
+    )
+    repair_uuids = sorted(
+        source_uuid
+        for source_uuid, object_id in objects_by_uuid.items()
+        if object_id not in object_ids_with_cantaloupe
+    )
+    counters["snapshot_live_uuids"] = len(live_uuids)
+    counters["repair_existing_uuids"] = len(objects_by_uuid)
+    counters["repair_missing_cantaloupe_uuids"] = len(repair_uuids)
+    log(
+        "Image Cantaloupe repair diff: "
+        f"live_uuids={len(live_uuids)} existing_uuids={len(objects_by_uuid)} "
+        f"missing_cantaloupe_uuids={len(repair_uuids)}.",
+        verbose,
+    )
+
+    processed_files = set()
+    for batch_number, uuid_batch in enumerate(chunked(repair_uuids, SNAPSHOT_BATCH_SIZE), start=1):
+        source_rows = []
+        for source_uuid in uuid_batch:
+            try:
+                source_rows.append(fetch_source_record_by_uuid(session, source_uuid))
+                counters["repair_fetched_objects"] += 1
+            except Exception as exc:
+                counters["errors"] += 1
+                print(f"Error fetching Archipelago UUID {source_uuid}: {exc}")
+
+        page_rows = collect_page_rows(
+            source_rows, session, cantaloupe_cache, counters, verbose,
+            newest_first=True, created_since=None, processed_files=processed_files,
+        )
+        process_page_rows(
+            page_rows, session, luna_cache, identifier_types, object_types, counters,
+            verbose, dry_run=dry_run, load_missing_only=False,
+            arch_uuid_changes=arch_uuid_changes,
+        )
+        log(
+            "Image Cantaloupe repair progress: "
+            f"batches={batch_number} fetched_objects={counters['repair_fetched_objects']}/"
+            f"{len(repair_uuids)} swept_images={counters['swept_images']} "
+            f"inserted_cantaloupe={counters['inserted_identifiers']} "
+            f"errors={counters['errors']}.",
+            verbose,
+        )
+
+    return manifest_sha256
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Synchronise Archipelago images into the ERIC database."
@@ -799,6 +901,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--repair-missing-cantaloupe-from-snapshot",
+        action="store_true",
+        help=(
+            "For live image UUIDs in a completed snapshot, fill Cantaloupe IDs "
+            "only where the existing ERIC Image has none."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Calculate and print the changes, then roll them back instead of committing.",
@@ -830,8 +940,11 @@ def main():
     args = parse_args()
     verbose = not args.quiet
     created_since = None
-    if args.from_snapshot and (args.resume or args.start_page is not None or args.start_offset):
-        raise SystemExit("Do not combine --from-snapshot with crawl-resume or start options.")
+    snapshot_mode = args.from_snapshot or args.repair_missing_cantaloupe_from_snapshot
+    if args.from_snapshot and args.repair_missing_cantaloupe_from_snapshot:
+        raise SystemExit("Use only one snapshot sync mode at a time.")
+    if snapshot_mode and (args.resume or args.start_page is not None or args.start_offset):
+        raise SystemExit("Do not combine a snapshot mode with crawl-resume or start options.")
 
     if args.resume and args.start_page is not None:
         raise SystemExit("Do not combine --resume with --start-page.")
@@ -888,8 +1001,13 @@ def main():
         identifier_types = {row.shortcode: row for row in IdentifierType.query.all()}
         object_types = {row.name: row for row in ObjectType.query.all()}
 
-        if args.from_snapshot:
-            manifest_sha256 = sync_missing_images_from_snapshot(
+        if snapshot_mode:
+            sync_snapshot_mode = (
+                repair_missing_cantaloupe_from_snapshot
+                if args.repair_missing_cantaloupe_from_snapshot
+                else sync_missing_images_from_snapshot
+            )
+            manifest_sha256 = sync_snapshot_mode(
                 session,
                 identifier_types,
                 object_types,
@@ -917,14 +1035,24 @@ def main():
                     state.last_successful_source_time = sync_started_at
                     state.last_completed_at = utcnow()
                 db.session.commit()
-            print(
-                "Image snapshot sync complete. "
-                f"live_uuids={counters['snapshot_live_uuids']} "
-                f"missing_uuids={counters['snapshot_missing_uuids']} "
-                f"fetched_objects={counters['snapshot_fetched_objects']} "
-                f"inserted_objects={counters['inserted_objects']} "
-                f"inserted_arks={counters['inserted_arks']} errors={counters['errors']}"
-            )
+            if args.repair_missing_cantaloupe_from_snapshot:
+                print(
+                    "Image Cantaloupe repair complete. "
+                    f"live_uuids={counters['snapshot_live_uuids']} "
+                    f"missing_cantaloupe_uuids={counters['repair_missing_cantaloupe_uuids']} "
+                    f"fetched_objects={counters['repair_fetched_objects']} "
+                    f"inserted_identifiers={counters['inserted_identifiers']} "
+                    f"errors={counters['errors']}"
+                )
+            else:
+                print(
+                    "Image snapshot sync complete. "
+                    f"live_uuids={counters['snapshot_live_uuids']} "
+                    f"missing_uuids={counters['snapshot_missing_uuids']} "
+                    f"fetched_objects={counters['snapshot_fetched_objects']} "
+                    f"inserted_objects={counters['inserted_objects']} "
+                    f"inserted_arks={counters['inserted_arks']} errors={counters['errors']}"
+                )
             if not args.dry_run and counters["errors"]:
                 raise SystemExit("Image snapshot sync completed with errors.")
             return

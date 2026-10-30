@@ -30,6 +30,7 @@ Useful commands:
 - `python3 scripts/sync_archipelago_images.py --max-pages 1 --dry-run` is the quickest way to time one page of image-sync work.
 - `python3 scripts/sync_archipelago_images.py --resume` continues an interrupted full sync from `data/output/image_sync_checkpoint.json`.
 - `python3 scripts/sync_archipelago_images.py --from-snapshot --dry-run` previews reconciliation of only live Archipelago image UUIDs absent from ERIC. It requires a completed `images` snapshot and is the intended incremental cron mode.
+- `python3 scripts/sync_archipelago_images.py --repair-missing-cantaloupe-from-snapshot --dry-run` previews Cantaloupe-ID repair only for live ERIC images which do not yet have one.
 - `python3 scripts/snapshot_archipelago_uuids.py images` creates a resumable,
   file-backed snapshot of the live image UUIDs. Use `--resume` after an
   interrupted run; a completed snapshot must be deliberately replaced with

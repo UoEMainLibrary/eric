@@ -63,6 +63,15 @@ only live image UUIDs absent from ERIC. The three compound-object jobs are
 idempotent full sweeps at present: rerunning them is safe, but they restart at
 page one.
 
+If a parser correction means existing live images need only their Cantaloupe
+identifier filled, use the targeted repair mode. It does not prune or fetch the
+whole collection:
+
+```bash
+python3 scripts/sync_archipelago_images.py --repair-missing-cantaloupe-from-snapshot --dry-run
+python3 scripts/sync_archipelago_images.py --repair-missing-cantaloupe-from-snapshot
+```
+
 ## Important behaviour
 
 - A replacement upload with a new Archipelago UUID is a new ERIC object. The
