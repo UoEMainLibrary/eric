@@ -346,7 +346,7 @@ def redirect_luna_identifier_to_arch(identifier):
     if book_identifier:
         compound = CompoundObject.query.filter_by(object_id=book_identifier.object_id).first()
         if compound:
-            return redirect_compound_to_manifest(compound)
+            return redirect_compound_to_arch(compound)
         app.logger.warning(
             "LUNA book identifier=%s belongs to object_id=%s, which is not a compound object",
             identifier,
