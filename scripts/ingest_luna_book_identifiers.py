@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Attach exceptional LUNA book-reader IDs to their ERIC CompoundObjects.
 
-The input maps each legacy LUNA book ID to a domain-scoped compound shelfmark.
+The input maps each legacy LUNA book ID to a compound-object shelfmark.
 By default this reports the result without writing; pass --apply to insert the
 unambiguous identifiers after migration 004.
 """
@@ -15,14 +15,20 @@ import bootstrap
 
 from app import CompoundObject, Identifier, IdentifierType, app, db
 from project_paths import DATA_DIR
+from sqlalchemy import func
 
 
 DEFAULT_SOURCE = DATA_DIR / "input" / "luna_book_identifiers.csv"
-REQUIRED_COLUMNS = {"domain", "shelfmark", "luna_identifier"}
+REQUIRED_COLUMNS = {"shelfmark", "luna_identifier"}
 
 
 def normalise_shelfmark(value):
     return " ".join((value or "").upper().split())
+
+
+def lookup_shelfmark(value):
+    """Compare shelfmarks while ignoring only case, spaces, and full stops."""
+    return value.replace(" ", "").replace(".", "")
 
 
 def main():
@@ -44,23 +50,31 @@ def main():
         counters = Counter()
         for row_number, row in enumerate(rows, start=2):
             identifier = (row.get("luna_identifier") or "").strip()
-            domain = (row.get("domain") or "").strip()
             shelfmark = normalise_shelfmark(row.get("shelfmark"))
-            if not identifier or not domain or not shelfmark:
+            if not identifier or not shelfmark:
                 counters["invalid"] += 1
-                print(f"Skipping {args.source}:{row_number}: missing identifier, domain, or shelfmark.")
+                print(f"Skipping {args.source}:{row_number}: missing identifier or shelfmark.")
                 continue
 
             matches = (
                 CompoundObject.query
-                .filter_by(domain=domain, shelfmark_normalised=shelfmark)
+                .filter(
+                    func.upper(
+                        func.replace(
+                            func.replace(CompoundObject.shelfmark_normalised, " ", ""),
+                            ".",
+                            "",
+                        )
+                    )
+                    == lookup_shelfmark(shelfmark)
+                )
                 .all()
             )
             if len(matches) != 1:
                 counters["unmatched"] += 1
                 print(
-                    f"Skipping {args.source}:{row_number}: {domain}/{shelfmark!r} "
-                    f"matched {len(matches)} compound objects."
+                    f"Skipping {args.source}:{row_number}: {shelfmark!r} matched "
+                    f"{len(matches)} compound objects."
                 )
                 continue
 
