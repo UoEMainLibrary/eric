@@ -212,23 +212,24 @@ def iter_compound_object_records(session, jsonapi_root, page_limit, max_pages, t
 def identifier_type(shortcode):
     result = IdentifierType.query.filter_by(shortcode=shortcode).first()
     if result is None:
-        raise RuntimeError(f"Missing IdentifierType {shortcode!r}; apply migration 003 first.")
+        raise RuntimeError(f"Missing IdentifierType {shortcode!r}; apply migrations first.")
     return result
 
 
-def ensure_identifier(obj, id_type, value, counters):
+def ensure_identifier(obj, id_type, value, counters, counter_key="created_catalogue_identifiers"):
     existing = Identifier.query.filter_by(type_id=id_type.id, value=value).first()
     if existing:
         if existing.object_id != obj.id:
             raise IdentifierConflict(
                 f"{id_type.shortcode} ID {value!r} belongs to object_id={existing.object_id}"
             )
-        return
+        return False
     db.session.add(Identifier(type_id=id_type.id, object_id=obj.id, value=value))
-    counters["created_catalogue_identifiers"] += 1
+    counters[counter_key] += 1
+    return True
 
 
-def process_record(record, arch_type, catalogue_types, root_domains, counters):
+def process_record(record, arch_type, catalogue_types, reference_types, root_domains, counters):
     source_uuid = str(record.get("id") or "").strip()
     if not source_uuid:
         raise RuntimeError("record has no Archipelago UUID")
@@ -248,6 +249,15 @@ def process_record(record, arch_type, catalogue_types, root_domains, counters):
 
     compound_object.domain = domain
     counters["domains_set"] += 1
+    reference = (compound_object.shelfmark or "").strip()
+    if reference:
+        ensure_identifier(
+            compound_object.object,
+            reference_types[domain],
+            reference,
+            counters,
+            counter_key="created_reference_identifiers",
+        )
     if not source_id:
         counters["missing_source_ids"] += 1
         print(f"No source_id for compound object {source_uuid} ({domain}).", file=sys.stderr)
@@ -270,6 +280,11 @@ def main():
             "rare_books": identifier_type("alma"),
             "museums": identifier_type("vernon"),
         }
+        reference_types = {
+            "archives": identifier_type("archives_reference"),
+            "rare_books": identifier_type("rare_books_shelfmark"),
+            "museums": identifier_type("vernon_accession"),
+        }
         counters = Counter()
         state = SyncState.query.filter_by(job_name=SYNC_JOB_NAME).first()
         if state is None:
@@ -287,7 +302,14 @@ def main():
                 for record in records:
                     savepoint = db.session.begin_nested()
                     try:
-                        process_record(record, arch_type, catalogue_types, root_domains, counters)
+                        process_record(
+                            record,
+                            arch_type,
+                            catalogue_types,
+                            reference_types,
+                            root_domains,
+                            counters,
+                        )
                         db.session.flush()
                         savepoint.commit()
                     except Exception as exc:
@@ -318,6 +340,7 @@ def main():
             f"pages={counters['pages']} processed={counters['processed']} "
             f"domains_set={counters['domains_set']} "
             f"created_catalogue_identifiers={counters['created_catalogue_identifiers']} "
+            f"created_reference_identifiers={counters['created_reference_identifiers']} "
             f"missing_compound_objects={counters['missing_compound_objects']} "
             f"unclassified_domains={counters['unclassified_domains']} "
             f"missing_source_ids={counters['missing_source_ids']} errors={counters['errors']}"

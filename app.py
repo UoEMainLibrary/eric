@@ -336,6 +336,24 @@ def normalise_iiif_size_request(iiif_params, object_id):
 
 def redirect_luna_identifier_to_arch(identifier):
     identifier = normalise_identifier_value(identifier).split(":", 1)[0]
+    book_identifier = (
+        Identifier.query
+        .join(Identifier.type)
+        .filter(IdentifierType.shortcode == "luna_book")
+        .filter(Identifier.value == identifier)
+        .first()
+    )
+    if book_identifier:
+        compound = CompoundObject.query.filter_by(object_id=book_identifier.object_id).first()
+        if compound:
+            return redirect_compound_to_manifest(compound)
+        app.logger.warning(
+            "LUNA book identifier=%s belongs to object_id=%s, which is not a compound object",
+            identifier,
+            book_identifier.object_id,
+        )
+        abort(404)
+
     _, obj = fetch_object_for_identifier(identifier)
 
     arch_ident = get_identifier_by_shortcode(obj, "arch")
@@ -386,6 +404,7 @@ def redirect_compound_to_arch(compound):
     if not arch_url:
         abort(404)
     return redirect(arch_url, code=302)
+
 
 def redirect_book_to_manifest(mediafile):
     parts = mediafile.strip("/").split("/")

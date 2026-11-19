@@ -14,6 +14,10 @@ def init_identifier_types():
         ("archives_space", "ArchivesSpace record ID", None),
         ("alma", "Alma record ID", None),
         ("vernon", "Vernon record ID", None),
+        ("luna_book", "LUNA book-reader ID", None),
+        ("archives_reference", "Archives reference", None),
+        ("rare_books_shelfmark", "Rare Books shelfmark", None),
+        ("vernon_accession", "Vernon accession number", None),
     ]
 
     for shortcode, desc, url in defaults:

@@ -44,3 +44,10 @@ Useful commands:
   are updated only when their stored route changes. Use `--dry-run` to verify
   the source first, or pass `data/output/recent_item_tinyurls.csv` to import
   the generated CSV workflow instead.
+- `python3 scripts/backfill_compound_object_reference_identifiers.py` previews
+  the domain-scoped compound-object reference identifiers derived from existing
+  shelfmark values. Run it with `--apply` after migration 004 to write the
+  unambiguous rows.
+- `python3 scripts/ingest_luna_book_identifiers.py` previews the exceptional
+  LUNA book-reader IDs that resolve to compound-object manifests. Run it with
+  `--apply` after migration 004 to write the unambiguous rows.

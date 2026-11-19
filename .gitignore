@@ -142,6 +142,7 @@ data/output/archipelago_snapshots
 data/db/*.db
 
 *.csv
+!data/input/luna_book_identifiers.csv
 *.xlsx
 
 .DS_Store
