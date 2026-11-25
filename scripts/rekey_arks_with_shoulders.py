@@ -41,6 +41,11 @@ def parse_args():
             "wait for their authoritative ArchivesSpace ARKs"
         ),
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="show only exceptions and the final summary, not routine re-key proposals",
+    )
     return parser.parse_args()
 
 
@@ -104,10 +109,11 @@ def main():
                 continue
             if namespace == "archives" and not args.include_archives:
                 counters["archives_deferred"] += 1
-                print(
-                    f"Deferring object_id={obj.id}: wait for the authoritative "
-                    f"ArchivesSpace ARK (old ARK {identifier.value})."
-                )
+                if not args.quiet:
+                    print(
+                        f"Deferring object_id={obj.id}: wait for the authoritative "
+                        f"ArchivesSpace ARK (old ARK {identifier.value})."
+                    )
                 continue
 
             uuid_name = unshouldered_uuid(identifier.value)
@@ -129,7 +135,8 @@ def main():
                 continue
 
             counters["would_rekey"] += 1
-            print(f"{identifier.value} -> {new_value} (object_id={obj.id})")
+            if not args.quiet:
+                print(f"{identifier.value} -> {new_value} (object_id={obj.id})")
             if args.apply:
                 identifier.type_id = legacy_type.id
                 db.session.add(
