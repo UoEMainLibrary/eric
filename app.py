@@ -944,14 +944,8 @@ def ark_manifest(naan, ark_suffix):
     remains the stable entry point, while this route hides that implementation
     detail from citations and from N2T.
     """
-    canonical_ark, obj = fetch_object_for_ark(naan, ark_suffix)
-    # Existing Presentation manifests were generated before ERIC's ARKs were
-    # re-keyed with shoulders.  Keep the public ARK endpoint canonical, but
-    # hand off to the retained legacy manifest path until that separate
-    # manifest deployment is regenerated with the new ARKs.
-    legacy_ark = get_identifier_by_shortcode(obj, "ark_legacy")
-    manifest_ark = legacy_ark.value if legacy_ark else canonical_ark
-    return redirect(f"{MANIFEST_URL_BASE}/{manifest_ark}/manifest", code=302)
+    canonical_ark, _ = fetch_object_for_ark(naan, ark_suffix)
+    return redirect(f"{MANIFEST_URL_BASE}/{canonical_ark}/manifest", code=302)
 
 
 @app.route("/ark:<naan>/<ark_suffix>/iiif", strict_slashes=False)
