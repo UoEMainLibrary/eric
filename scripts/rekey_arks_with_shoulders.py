@@ -13,6 +13,7 @@ import uuid
 from collections import Counter
 
 import bootstrap
+from sqlalchemy.orm import joinedload
 
 from app import (
     ARK_IDENTIFIER_SHORTCODES,
@@ -61,11 +62,11 @@ def unshouldered_uuid(value):
     return str(parsed)
 
 
-def namespace_for_object(obj):
-    compound = CompoundObject.query.filter_by(object_id=obj.id).first()
-    if compound:
-        if compound.domain in ARK_SHOULDERS:
-            return compound.domain
+def namespace_for_object(obj, compound_domains):
+    if obj.id in compound_domains:
+        compound_domain = compound_domains[obj.id]
+        if compound_domain in ARK_SHOULDERS:
+            return compound_domain
         return None
     return "media"
 
@@ -83,6 +84,7 @@ def main():
         all_arks = (
             Identifier.query
             .join(Identifier.type)
+            .options(joinedload(Identifier.object))
             .filter(IdentifierType.shortcode.in_(ARK_IDENTIFIER_SHORTCODES))
             .all()
         )
@@ -95,11 +97,17 @@ def main():
             for identifier in all_arks
             if identifier.type_id == ark_type.id and unshouldered_uuid(identifier.value)
         ]
+        compound_domains = {
+            object_id: domain
+            for object_id, domain in db.session.query(
+                CompoundObject.object_id, CompoundObject.domain
+            ).all()
+        }
 
         counters = Counter()
         for identifier in candidates:
             obj = identifier.object
-            namespace = namespace_for_object(obj)
+            namespace = namespace_for_object(obj, compound_domains)
             if not namespace:
                 counters["unclassified"] += 1
                 print(
@@ -127,10 +135,7 @@ def main():
                 )
                 continue
 
-            already_current = Identifier.query.filter_by(
-                type_id=ark_type.id, value=new_value
-            ).first()
-            if already_current:
+            if equivalent:
                 counters["already_current"] += 1
                 continue
 
