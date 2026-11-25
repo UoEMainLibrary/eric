@@ -4,9 +4,64 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Image link resolution service | University of Edinburgh</title>
+  <style>
+    :root {
+      color: #1d1d1b;
+      background: #f5f3ef;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    body {
+      display: grid;
+      min-height: 100vh;
+      margin: 0;
+      place-items: center;
+    }
+
+    main {
+      box-sizing: border-box;
+      width: min(42rem, calc(100% - 2rem));
+      margin: 2rem auto;
+      padding: clamp(2rem, 6vw, 4rem);
+      border-top: 0.45rem solid #c7004c;
+      background: #fff;
+      box-shadow: 0 0.5rem 2rem rgb(0 0 0 / 12%);
+    }
+
+    .collection-image {
+      display: block;
+      width: 100%;
+      aspect-ratio: 3 / 2;
+      margin: 0 0 2rem;
+      object-fit: cover;
+    }
+
+    h1 {
+      margin: 0 0 1.25rem;
+      color: #333;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 5vw, 3rem);
+      font-weight: 400;
+      line-height: 1.15;
+    }
+
+    p {
+      max-width: 38rem;
+      margin: 0 0 1rem;
+      font-size: 1.08rem;
+    }
+
+    p:last-child {
+      margin-bottom: 0;
+      color: #555;
+      font-size: 0.95rem;
+    }
+  </style>
 </head>
 <body>
   <main>
+    <img class="collection-image" src="Photos/0014530.jpg" alt="A horse sculpture displayed between cases of books and manuscripts.">
     <h1>Image link resolution service</h1>
     <p>The LUNA digital-image system has been decommissioned.</p>
     <p>This service preserves and redirects historic University of Edinburgh LUNA image links to their current locations in Digital Collections.</p>
