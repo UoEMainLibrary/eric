@@ -209,7 +209,7 @@ ARK_SHOULDERS = {
     # application minted the ARK.  Keep them short and avoid ``l``, which is
     # readily confused with ``1`` or ``I`` in citations.
     "archives": "a",
-    "rare_books": "r",
+    "rare_books": "b",
     "museums": "m",
     "media": "d",
 }

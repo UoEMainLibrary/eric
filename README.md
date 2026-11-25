@@ -23,7 +23,7 @@ Useful commands:
 - `python3 scripts/repair_ark_url_construct.py` previews the one-off repair for
   the ARK link template; add `--apply` to update the existing database row.
 - `python3 scripts/rekey_arks_with_shoulders.py` previews re-keying existing
-  unshouldered UUID ARKs to their `a-`, `r-`, `m-`, or `d-` canonical
+  unshouldered UUID ARKs to their `a-`, `b-`, `m-`, or `d-` canonical
   forms. Apply migration 005 first, review its output, then add `--apply` to
   retain the old ARKs as resolver aliases while writing the new canonical ARKs.
   Archives objects are deferred by default, pending their authoritative
