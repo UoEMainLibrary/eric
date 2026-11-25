@@ -9,7 +9,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_uuid import FlaskUUID
 from sqlalchemy import func
 from sqlalchemy_utils import UUIDType
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import aliased, joinedload
 from markupsafe import escape
 from urllib.parse import parse_qs, unquote, urlparse
 from datetime import datetime
@@ -390,13 +390,32 @@ def redirect_luna_identifier_to_arch(identifier):
 def redirect_luna_identifier_to_cantaloupe(identifier, iiif_params):
     """Resolve a LUNA image identifier and redirect to its Cantaloupe image."""
     identifier = normalise_identifier_value(identifier).split(":", 1)[0]
-    _, obj = fetch_object_for_identifier(identifier)
-
-    cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
-    if not cant_ident:
+    # This is a high-volume compatibility route for legacy LUNA image URLs.
+    # Fetching the LUNA object and eager-loading all of its identifiers costs
+    # two queries and more ORM work than this redirect needs.  Resolve the
+    # matching Cantaloupe identifier directly in one joined query instead.
+    luna_ident = aliased(Identifier)
+    luna_type = aliased(IdentifierType)
+    cant_ident = aliased(Identifier)
+    cant_type = aliased(IdentifierType)
+    row = (
+        db.session.query(cant_ident.value, cant_type.url_construct)
+        .join(cant_type, cant_ident.type_id == cant_type.id)
+        .join(luna_ident, luna_ident.object_id == cant_ident.object_id)
+        .join(luna_type, luna_ident.type_id == luna_type.id)
+        .filter(luna_type.shortcode == "luna")
+        .filter(luna_ident.value == identifier)
+        .filter(cant_type.shortcode == "cantaloupe")
+        .first()
+    )
+    if not row:
         abort(404)
 
-    cant_url = get_cantaloupe_base_url(cant_ident)
+    cantaloupe_value, url_construct = row
+    cant_url = construct_url(url_construct, cantaloupe_value)
+    if not cant_url:
+        abort(404)
+    cant_url = cant_url.rsplit("/", 4)[0]
     return redirect(f"{cant_url}/{iiif_params}", code=302)
 
 def normalise_book_shelfmark(value):
