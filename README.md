@@ -22,6 +22,16 @@ Useful commands:
 - `python3 scripts/init_db.py` creates the current schema and seed rows.
 - `python3 scripts/repair_ark_url_construct.py` previews the one-off repair for
   the ARK link template; add `--apply` to update the existing database row.
+- `python3 scripts/rekey_arks_with_shoulders.py` previews re-keying existing
+  unshouldered UUID ARKs to their `a-`, `r-`, `m-`, or `d-` canonical
+  forms. Apply migration 005 first, review its output, then add `--apply` to
+  retain the old ARKs as resolver aliases while writing the new canonical ARKs.
+  Archives objects are deferred by default, pending their authoritative
+  ArchivesSpace ARKs.
+- `python3 scripts/backfill_image_dimensions.py` fetches missing IIIF source
+  dimensions for existing image objects. Run a small dry-run batch first, then
+  use `--apply` to persist them after migration 006. Add `--luna <identifier>`
+  to fill one known image first.
 - `python3 scripts/get_data.py --resume` crawls `dams-live2` oldest-first and resumes from the last completed source page using `data/output/get_data_checkpoint.json`.
 - `python3 scripts/get_data.py --clear-csvs --resume` clears the generated export CSVs but keeps the crawl checkpoint, so the next batch starts where the previous crawl left off.
 - `python3 scripts/get_data.py --fresh` clears the generated export CSVs and checkpoint before starting a new crawl from the beginning.

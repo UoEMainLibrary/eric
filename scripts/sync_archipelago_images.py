@@ -20,6 +20,7 @@ from scripts.archipelago_sweep import (
     canonical_file_identifier,
     extract_cantaloupe_identifier_from_image,
     fetch_cantaloupe_data,
+    fetch_iiif_dimensions,
     fetch_luna_identifier,
     fetch_source_page,
     load_crawl_checkpoint,
@@ -275,6 +276,28 @@ def sync_object_metadata(obj, row, object_types, counters):
         counters["updated_objects"] += 1
 
 
+def sync_object_dimensions(obj, row, session, iiif_info_cache, counters, verbose):
+    """Fill source dimensions once, from the object's IIIF info document."""
+    if obj.width and obj.height:
+        return
+
+    info_url = row.get("iiif_info_url")
+    if not info_url:
+        counters["missing_iiif_info_urls"] += 1
+        return
+    try:
+        width, height = fetch_iiif_dimensions(
+            session, info_url, iiif_info_cache, verbose=verbose
+        )
+    except Exception as exc:
+        counters["dimension_errors"] += 1
+        print(f"Warning: Could not fetch dimensions for {row.get('file')}: {exc}")
+        return
+
+    obj.width, obj.height = width, height
+    counters["updated_dimensions"] += 1
+
+
 def merge_objects(target, source, counters):
     if target.id == source.id:
         return
@@ -404,7 +427,7 @@ def ensure_ark_identifier(obj, identifier_types, counters):
 
     db.session.add(
         Identifier(
-            value=mint_ark(),
+            value=mint_ark("media"),
             object_id=obj.id,
             type_id=ark_type.id,
         )
@@ -574,6 +597,7 @@ def collect_page_rows(
                     "arch": normalise_identifier_value(arch_uuid),
                     "file": filename,
                     "cantaloupe": normalise_identifier_value(cantaloupe_identifier),
+                    "iiif_info_url": mapped_cantaloupe.get("info_url"),
                     "source_created_at": normalise_identifier_value(created),
                 },
                 counters,
@@ -635,6 +659,7 @@ def process_page_rows(
     page_rows,
     session,
     luna_cache,
+    iiif_info_cache,
     identifier_types,
     object_types,
     counters,
@@ -720,6 +745,9 @@ def process_page_rows(
                     merge_objects(obj, duplicate, counters)
 
             sync_object_metadata(obj, row, object_types, counters)
+            sync_object_dimensions(
+                obj, row, session, iiif_info_cache, counters, verbose
+            )
 
             for shortcode in MANAGED_IDENTIFIER_SHORTCODES:
                 reconcile_identifier(
@@ -750,6 +778,7 @@ def sync_missing_images_from_snapshot(
     identifier_types,
     object_types,
     luna_cache,
+    iiif_info_cache,
     cantaloupe_cache,
     counters,
     verbose,
@@ -799,6 +828,7 @@ def sync_missing_images_from_snapshot(
             page_rows,
             session,
             luna_cache,
+            iiif_info_cache,
             identifier_types,
             object_types,
             counters,
@@ -824,6 +854,7 @@ def repair_missing_cantaloupe_from_snapshot(
     identifier_types,
     object_types,
     luna_cache,
+    iiif_info_cache,
     cantaloupe_cache,
     counters,
     verbose,
@@ -873,7 +904,7 @@ def repair_missing_cantaloupe_from_snapshot(
             newest_first=True, created_since=None, processed_files=processed_files,
         )
         process_page_rows(
-            page_rows, session, luna_cache, identifier_types, object_types, counters,
+            page_rows, session, luna_cache, iiif_info_cache, identifier_types, object_types, counters,
             verbose, dry_run=dry_run, load_missing_only=False,
             arch_uuid_changes=arch_uuid_changes,
         )
@@ -1022,6 +1053,7 @@ def main():
         retry_backoff=args.retry_backoff,
     )
     luna_cache = {}
+    iiif_info_cache = {}
     cantaloupe_cache = {}
     processed_files = None
 
@@ -1090,6 +1122,7 @@ def main():
                 identifier_types,
                 object_types,
                 luna_cache,
+                iiif_info_cache,
                 cantaloupe_cache,
                 counters,
                 verbose,
@@ -1176,6 +1209,7 @@ def main():
                 page_rows,
                 session,
                 luna_cache,
+                iiif_info_cache,
                 identifier_types,
                 object_types,
                 counters,

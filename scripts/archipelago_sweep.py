@@ -440,10 +440,33 @@ def fetch_cantaloupe_data(session, arch_uuid, cache, verbose=True):
             f"{filename_match.group(1)}.{filename_match.group(2).lower()}"
         ] = {
             "cantaloupe": cantaloupe_id,
+            "info_url": info_url,
         }
 
     cache[arch_uuid] = mapping
     return mapping
+
+
+def fetch_iiif_dimensions(session, info_url, cache, verbose=True):
+    """Return validated source dimensions from a Cantaloupe IIIF info document."""
+    if not info_url:
+        return None
+    if info_url in cache:
+        return cache[info_url]
+
+    log(f"Fetching IIIF dimensions: {info_url}", verbose)
+    response = session.get(info_url, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    payload = response.json()
+    try:
+        width, height = int(payload["width"]), int(payload["height"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"IIIF info document has invalid dimensions: {info_url}") from exc
+    if width < 1 or height < 1:
+        raise ValueError(f"IIIF info document has non-positive dimensions: {info_url}")
+
+    cache[info_url] = (width, height)
+    return cache[info_url]
 
 
 def classify_tinyurl(target_url):

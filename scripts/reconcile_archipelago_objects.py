@@ -173,7 +173,7 @@ def create_object(image_type, types, row, counters):
     obj = Object(type_id=image_type.id, uuid=uuid.uuid4(), primary_id=None)
     db.session.add(obj)
     db.session.flush()
-    ark = set_identifier(obj, types["ark"], mint_ark(), counters)
+    ark = set_identifier(obj, types["ark"], mint_ark("media"), counters)
     obj.primary_id = ark.value
     counters["created_objects"] += 1
     return obj

@@ -37,6 +37,8 @@ class Object(db.Model):
     type_id = db.Column(db.Integer, db.ForeignKey('object_type.id'), nullable=False)
     type = db.relationship('ObjectType', lazy=False, backref=db.backref('objects', lazy=True))
     primary_id = db.Column(db.String(64))
+    width = db.Column(db.Integer, nullable=True)
+    height = db.Column(db.Integer, nullable=True)
     source_created_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -202,10 +204,29 @@ NAAN = "83794"
 LUNA_IDENTIFIER_RE = re.compile(r"\b[A-Za-z0-9]+~\d+~\d+~\d+~\d+\b")
 BROWSER_SAFE_LONG_SIDE_PIXELS = 1536
 MANIFEST_URL_BASE = "https://manifest.collections.ed.ac.uk/v3"
+ARK_SHOULDERS = {
+    # These intentionally describe collection provenance, rather than which
+    # application minted the ARK.  Keep them short and avoid ``l``, which is
+    # readily confused with ``1`` or ``I`` in citations.
+    "archives": "a",
+    "rare_books": "r",
+    "museums": "m",
+    "media": "d",
+}
+ARK_IDENTIFIER_SHORTCODES = ("ark", "ark_legacy")
 
-def mint_ark():
+def mint_ark(namespace="media"):
+    """Mint an ERIC ARK with the stable shoulder for its namespace.
+
+    ARK names retain hyphens for human-readable canonical citations.  The
+    resolver treats them as identity-inert when looking an ARK up.
+    """
+    try:
+        shoulder = ARK_SHOULDERS[namespace]
+    except KeyError as exc:
+        raise ValueError(f"Unknown ARK namespace {namespace!r}") from exc
     suffix = str(uuid.uuid4())
-    return f"ark:/{NAAN}/{suffix}"
+    return f"ark:/{NAAN}/{shoulder}-{suffix}"
 
 # ------------------------------------------------------------
 # HELPERS
@@ -317,7 +338,7 @@ def get_cantaloupe_base_url(cant_identifier):
         abort(404)
     return cant_url.rsplit("/", 4)[0]
 
-def normalise_iiif_size_request(iiif_params, object_id):
+def normalise_iiif_size_request(iiif_params, obj):
     parts = iiif_params.split("/", 3)
     if len(parts) < 4:
         return iiif_params
@@ -326,10 +347,13 @@ def normalise_iiif_size_request(iiif_params, object_id):
     if region != "full" or size != "full":
         return iiif_params
 
+    if obj.width and obj.height and max(obj.width, obj.height) <= BROWSER_SAFE_LONG_SIDE_PIXELS:
+        return iiif_params
+
     safe_size = f"!{BROWSER_SAFE_LONG_SIDE_PIXELS},{BROWSER_SAFE_LONG_SIDE_PIXELS}"
     app.logger.info(
         "Rewriting IIIF full/full request for object_id=%s to bounded browser-safe size %s",
-        object_id,
+        obj.id,
         safe_size,
     )
     return f"{region}/{safe_size}/{rotation}/{remainder}"
@@ -506,6 +530,7 @@ def init_identifier_types():
         # ARK values are stored in full (for example ``ark:/83794/<uuid>``),
         # so the resolver URL must not add an ARK prefix of its own.
         ("ark", "Archival Resource Key", "https://id.collections.ed.ac.uk/<id>"),
+        ("ark_legacy", "Legacy Archival Resource Key", None),
         ("luna", "LUNA Image ID", "https://images.is.ed.ac.uk/luna/servlet/detail/<id>"),
         ("arch", "Archipelago UUID", "https://digital.collections.ed.ac.uk/do/<id>"),
         ("arch_nid", "Archipelago Drupal node ID", "https://digital.collections.ed.ac.uk/node/<id>"),
@@ -676,7 +701,7 @@ def luna_iiif_info(identifier):
 def luna_iiif(identifier, iiif_params):
     identifier = normalise_identifier_value(identifier)
     _, obj = fetch_object_for_identifier(identifier)
-    rewritten_params = normalise_iiif_size_request(iiif_params, obj.id)
+    rewritten_params = normalise_iiif_size_request(iiif_params, obj)
     return redirect_luna_identifier_to_cantaloupe(identifier, rewritten_params)
 
 # ------------------------------------------------------------
@@ -820,8 +845,34 @@ def fetch_object_for_ark(naan, suffix):
     if naan != NAAN:
         abort(404)
 
-    full_ark = f"ark:/{naan}/{suffix}"
-    ident = Identifier.query.filter_by(value=full_ark).first()
+    requested_ark = f"ark:/{naan}/{suffix}"
+    ident = (
+        Identifier.query
+        .join(Identifier.type)
+        .filter(IdentifierType.shortcode.in_(ARK_IDENTIFIER_SHORTCODES))
+        .filter(Identifier.value == requested_ark)
+        .first()
+    )
+    if not ident:
+        # Hyphens in ARK names are identity-inert.  N2T deliberately removes
+        # them when redirecting, so retry with a hyphen-insensitive lookup.
+        dashless_ark = requested_ark.replace("-", "")
+        matches = (
+            Identifier.query
+            .join(Identifier.type)
+            .filter(IdentifierType.shortcode.in_(ARK_IDENTIFIER_SHORTCODES))
+            .filter(func.replace(Identifier.value, "-", "") == dashless_ark)
+            .all()
+        )
+        if len(matches) == 1:
+            ident = matches[0]
+        elif len(matches) > 1:
+            app.logger.error(
+                "Ambiguous hyphen-insensitive ARK lookup requested_ark=%s matches=%s",
+                requested_ark,
+                [match.value for match in matches],
+            )
+            abort(404)
     if not ident:
         abort(404)
 
@@ -833,32 +884,84 @@ def fetch_object_for_ark(naan, suffix):
     )
     if not obj:
         abort(404)
-    return full_ark, obj
+
+    # A legacy ARK is accepted for persistence, but responses always point to
+    # the object's current canonical ARK.
+    canonical_ident = get_identifier_by_shortcode(obj, "ark")
+    if not canonical_ident:
+        abort(404)
+    return canonical_ident.value, obj
 
 
-def redirect_ark_to_cantaloupe(naan, suffix, iiif_params):
-    _, obj = fetch_object_for_ark(naan, suffix)
+def redirect_to_canonical_ark(naan, requested_suffix, canonical_ark, suffix=""):
+    """Redirect a recognised dashless or legacy ARK to its canonical spelling."""
+    requested_ark = f"ark:/{naan}/{requested_suffix}"
+    if requested_ark == canonical_ark:
+        return None
+
+    canonical_suffix = canonical_ark.removeprefix(f"ark:/{naan}/")
+    target = f"/ark:/{naan}/{canonical_suffix}{suffix}"
+    if request.query_string:
+        target = f"{target}?{request.query_string.decode()}"
+    return redirect(target, code=301)
+
+
+def redirect_ark_to_cantaloupe(naan, suffix, iiif_params, obj=None):
+    if obj is None:
+        _, obj = fetch_object_for_ark(naan, suffix)
     cant_ident = get_identifier_by_shortcode(obj, "cantaloupe")
     if not cant_ident:
         abort(404)
+    iiif_params = normalise_iiif_size_request(iiif_params, obj)
     return redirect(f"{get_cantaloupe_base_url(cant_ident)}/{iiif_params}", code=302)
 
 
+@app.route("/ark:<naan>/<ark_suffix>/manifest", strict_slashes=False)
+@app.route("/ark:/<naan>/<ark_suffix>/manifest", strict_slashes=False)
+def ark_manifest(naan, ark_suffix):
+    """Resolve an ARK manifest qualifier to the Presentation API service.
+
+    The manifest service is deliberately a separate deployment.  The ARK
+    remains the stable entry point, while this route hides that implementation
+    detail from citations and from N2T.
+    """
+    canonical_ark, _ = fetch_object_for_ark(naan, ark_suffix)
+    return redirect(f"{MANIFEST_URL_BASE}/{canonical_ark}/manifest", code=302)
+
+
+@app.route("/ark:<naan>/<ark_suffix>/iiif", strict_slashes=False)
 @app.route("/ark:/<naan>/<ark_suffix>/iiif", strict_slashes=False)
 def ark_iiif_info(naan, ark_suffix):
     """Resolve an image ARK's bare IIIF service URL to Cantaloupe info.json."""
-    return redirect_ark_to_cantaloupe(naan, ark_suffix, "info.json")
+    canonical_ark, obj = fetch_object_for_ark(naan, ark_suffix)
+    canonical_redirect = redirect_to_canonical_ark(
+        naan, ark_suffix, canonical_ark, "/iiif"
+    )
+    if canonical_redirect:
+        return canonical_redirect
+    return redirect_ark_to_cantaloupe(naan, ark_suffix, "info.json", obj)
 
 
+@app.route("/ark:<naan>/<ark_suffix>/iiif/<path:iiif_params>")
 @app.route("/ark:/<naan>/<ark_suffix>/iiif/<path:iiif_params>")
 def ark_iiif(naan, ark_suffix, iiif_params):
     """Resolve an image ARK's IIIF Image API request to Cantaloupe."""
-    return redirect_ark_to_cantaloupe(naan, ark_suffix, iiif_params)
+    canonical_ark, obj = fetch_object_for_ark(naan, ark_suffix)
+    canonical_redirect = redirect_to_canonical_ark(
+        naan, ark_suffix, canonical_ark, f"/iiif/{iiif_params}"
+    )
+    if canonical_redirect:
+        return canonical_redirect
+    return redirect_ark_to_cantaloupe(naan, ark_suffix, iiif_params, obj)
 
 
+@app.route("/ark:<naan>/<path:suffix>")
 @app.route("/ark:/<naan>/<path:suffix>")
 def resolve_ark(naan, suffix):
     full_ark, obj = fetch_object_for_ark(naan, suffix)
+    canonical_redirect = redirect_to_canonical_ark(naan, suffix, full_ark)
+    if canonical_redirect:
+        return canonical_redirect
 
     # Determine requested format
     fmt = request.args.get("format")

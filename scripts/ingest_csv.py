@@ -30,6 +30,18 @@ def parse_source_created_at(value):
     return parsed
 
 
+def parse_positive_dimension(value):
+    """Return a positive integer dimension from CSV input, if one is present."""
+    value = normalise_identifier_value(value)
+    if not value:
+        return None
+    try:
+        dimension = int(value)
+    except ValueError:
+        return None
+    return dimension if dimension > 0 else None
+
+
 def preferred_primary_id(row):
     return (
         normalise_identifier_value(row.get("luna"))
@@ -126,6 +138,11 @@ def main():
                 if source_created_at and obj.source_created_at != source_created_at:
                     obj.source_created_at = source_created_at
 
+                width = parse_positive_dimension(row.get("width"))
+                height = parse_positive_dimension(row.get("height"))
+                if width and height and (obj.width != width or obj.height != height):
+                    obj.width, obj.height = width, height
+
                 # 3. Insert identifiers for this object
                 ids_to_add = {
                     "luna": row["luna"],
@@ -157,7 +174,7 @@ def main():
 
                 existing_ark = Identifier.query.filter_by(object_id=obj.id, type_id=ark_type.id).first()
                 if not existing_ark:
-                    ark_id = mint_ark()
+                    ark_id = mint_ark("media")
                     db.session.add(
                         Identifier(
                             value=ark_id,

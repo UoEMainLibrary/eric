@@ -2,9 +2,11 @@
 """Synchronise Archipelago Digital Object Collections into ERIC CompoundObjects.
 
 This is deliberately the first, collection-only harvest.  It creates the
-source-neutral ERIC CompoundObject and its stable ARK, then attaches the current
-Archipelago collection UUID and Drupal node ID as identifiers.  It does not
-create image memberships; that is the responsibility of a later sync job.
+source-neutral ERIC CompoundObject, then attaches the current Archipelago
+collection UUID and Drupal node ID as identifiers.  ERIC mints ARKs for Rare
+Books and Museums; Archives ARKs are deferred to the authoritative
+ArchivesSpace ingest.  It does not create image memberships; that is the
+responsibility of a later sync job.
 """
 
 import argparse
@@ -36,6 +38,10 @@ from scripts.archipelago_sweep import (
     REQUEST_TIMEOUT,
     build_session,
     log,
+)
+from scripts.sync_archipelago_compound_object_catalogue_data import (
+    classify_domain,
+    parse_root_domains,
 )
 
 
@@ -81,6 +87,10 @@ def parse_args():
     parser.add_argument("--timeout", type=int, default=REQUEST_TIMEOUT)
     parser.add_argument("--http-retries", type=int, default=DEFAULT_HTTP_RETRIES)
     parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF)
+    parser.add_argument(
+        "--root-domain", action="append", default=[], metavar="NID=DOMAIN",
+        help="Add or override a top-level Archipelago node mapping used for ARK shoulders.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     return parser.parse_args()
@@ -252,22 +262,25 @@ def find_unique_by_shelfmark(shelfmark_normalised):
     return matches[0] if matches else None
 
 
-def create_compound_object(compound_object_type, identifier_types, counters):
+def create_compound_object(compound_object_type, identifier_types, domain, counters):
     collection_object = Object(type_id=compound_object_type.id, primary_id=None)
     db.session.add(collection_object)
     db.session.flush()
-    ark_identifier = ensure_identifier(
-        collection_object, identifier_types["ark"], mint_ark(), counters
-    )
-    collection_object.primary_id = ark_identifier.value
-    compound_object = CompoundObject(object_id=collection_object.id)
+    if domain == "archives":
+        counters["deferred_archives_arks"] += 1
+    else:
+        ark_identifier = ensure_identifier(
+            collection_object, identifier_types["ark"], mint_ark(domain), counters
+        )
+        collection_object.primary_id = ark_identifier.value
+    compound_object = CompoundObject(object_id=collection_object.id, domain=domain)
     db.session.add(compound_object)
     db.session.flush()
     counters["created_compound_objects"] += 1
     return compound_object
 
 
-def sync_record(record, collection_type, identifier_types, counters):
+def sync_record(record, collection_type, identifier_types, root_domains, counters):
     attributes = record.get("attributes") or {}
     source_uuid = str(record.get("id") or "").strip()
     source_nid = coerce_int(attributes.get("drupal_internal__nid"))
@@ -280,6 +293,7 @@ def sync_record(record, collection_type, identifier_types, counters):
     shelfmark = extract_shelfmark(metadata)
     shelfmark_normalised = normalise_shelfmark(shelfmark)
     title = extract_title(attributes, metadata)
+    domain, _ = classify_domain(metadata, root_domains)
 
     source_record = find_by_source_uuid(source_uuid)
     if source_record:
@@ -290,7 +304,14 @@ def sync_record(record, collection_type, identifier_types, counters):
         if compound_object:
             counters["matched_shelfmark"] += 1
         else:
-            compound_object = create_compound_object(collection_type, identifier_types, counters)
+            if not domain:
+                raise RuntimeError(
+                    "Cannot mint an ARK for an unclassified compound object; "
+                    "add its domain mapping before synchronising."
+                )
+            compound_object = create_compound_object(
+                collection_type, identifier_types, domain, counters
+            )
 
     collection_object = compound_object.object
     source_identifier = ensure_identifier(
@@ -310,6 +331,8 @@ def sync_record(record, collection_type, identifier_types, counters):
     compound_object.shelfmark = shelfmark or None
     compound_object.shelfmark_normalised = shelfmark_normalised or None
     compound_object.title = title or None
+    if domain:
+        compound_object.domain = domain
     source_record.source_url = f"https://digital.collections.ed.ac.uk/node/{source_nid}"
     source_record.source_metadata_hash = metadata_hash(metadata)
     source_record.last_seen_at = utcnow()
@@ -324,6 +347,7 @@ def main():
     args = parse_args()
     if args.page_limit < 1:
         raise SystemExit("--page-limit must be at least 1")
+    root_domains = parse_root_domains(args.root_domain)
 
     verbose = not args.quiet
     session = build_session(
@@ -361,7 +385,9 @@ def main():
             ):
                 savepoint = db.session.begin_nested()
                 try:
-                    sync_record(record, compound_object_type, identifier_types, counters)
+                    sync_record(
+                        record, compound_object_type, identifier_types, root_domains, counters
+                    )
                     db.session.flush()
                     savepoint.commit()
                 except Exception as exc:
