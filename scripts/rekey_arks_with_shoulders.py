@@ -47,6 +47,15 @@ def parse_args():
         action="store_true",
         help="show only exceptions and the final summary, not routine re-key proposals",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help=(
+            "commit this many re-keyed ARKs at a time when using --apply "
+            "(default: %(default)s); makes an interrupted run safely resumable"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -73,6 +82,9 @@ def namespace_for_object(obj, compound_domains):
 
 def main():
     args = parse_args()
+    if args.batch_size < 1:
+        raise SystemExit("--batch-size must be at least 1")
+
     with app.app_context():
         ark_type = IdentifierType.query.filter_by(shortcode="ark").first()
         legacy_type = IdentifierType.query.filter_by(shortcode="ark_legacy").first()
@@ -105,6 +117,7 @@ def main():
         }
 
         counters = Counter()
+        pending_rekeys = 0
         for identifier in candidates:
             obj = identifier.object
             namespace = namespace_for_object(obj, compound_domains)
@@ -151,6 +164,11 @@ def main():
                     obj.primary_id = new_value
                 normalised_values[new_value.replace("-", "")] = identifier
                 counters["rekeyed"] += 1
+                pending_rekeys += 1
+                if pending_rekeys >= args.batch_size:
+                    db.session.commit()
+                    print(f"Committed batch: total_rekeyed={counters['rekeyed']}")
+                    pending_rekeys = 0
 
         if args.apply:
             db.session.commit()
