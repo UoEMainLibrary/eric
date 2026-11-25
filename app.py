@@ -584,6 +584,27 @@ def not_found(error):
 # ------------------------------------------------------------
 @app.route('/')
 def index():
+    # The legacy LUNA host is now an entry point for historic image links.
+    # Keep its root useful to people who arrive without a complete resolver
+    # URL, without affecting the identifier routes below or the ERIC API root.
+    host = request.host.split(":", 1)[0].lower()
+    if host in {"imagelinks.is.ed.ac.uk", "images.is.ed.ac.uk"}:
+        return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Image link resolution service | University of Edinburgh</title>
+</head>
+<body>
+  <main>
+    <h1>Image link resolution service</h1>
+    <p>The LUNA digital-image system has been decommissioned.</p>
+    <p>This service preserves and redirects historic University of Edinburgh LUNA image links to their current locations in Digital Collections.</p>
+    <p>If you reached this page from a saved link, please check that the full link was copied.</p>
+  </main>
+</body>
+</html>""", 200, {"Content-Type": "text/html; charset=utf-8"}
     return 'Welcome to ERIC!'
 
 @app.route('/object/<uuid:user_uuid>')
