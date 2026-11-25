@@ -21,6 +21,15 @@ def parse_args():
     parser.add_argument("--apply", action="store_true", help="save fetched dimensions")
     parser.add_argument("--limit", type=int, default=None, help="process at most this many images")
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help=(
+            "commit this many dimension updates at a time when using --apply "
+            "(default: %(default)s); makes an interrupted run safely resumable"
+        ),
+    )
+    parser.add_argument(
         "--luna",
         help="populate one image selected by its LUNA identifier",
     )
@@ -32,10 +41,13 @@ def main():
     args = parse_args()
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be at least 1")
+    if args.batch_size < 1:
+        raise SystemExit("--batch-size must be at least 1")
 
     session = build_session()
     info_cache = {}
     counters = Counter()
+    pending_updates = 0
     with app.app_context():
         query = (
             Identifier.query
@@ -71,10 +83,16 @@ def main():
                 continue
 
             counters["would_update"] += 1
-            print(f"object_id={obj.id} {obj.width}x{obj.height} -> {width}x{height}")
+            if not args.quiet:
+                print(f"object_id={obj.id} {obj.width}x{obj.height} -> {width}x{height}")
             if args.apply:
                 obj.width, obj.height = width, height
                 counters["updated"] += 1
+                pending_updates += 1
+                if pending_updates >= args.batch_size:
+                    db.session.commit()
+                    print(f"Committed batch: total_updated={counters['updated']}")
+                    pending_updates = 0
 
         if args.apply:
             db.session.commit()
