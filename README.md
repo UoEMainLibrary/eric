@@ -61,3 +61,6 @@ Useful commands:
 - `python3 scripts/ingest_luna_book_identifiers.py` previews the exceptional
   LUNA book-reader IDs that resolve to compound-object manifests. Run it with
   `--apply` after migration 004 to write the unambiguous rows.
+- `python3 scripts/export_vernon_manifests.py` writes a Vernon XML import file
+  containing each Vernon-linked compound object's current ARK and its modern,
+  dashless N2T manifest URL. Use `--dry-run` to review the record count first.
