@@ -938,14 +938,23 @@ def redirect_ark_to_cantaloupe(naan, suffix, iiif_params, obj=None):
 @app.route("/ark:<naan>/<ark_suffix>/manifest", strict_slashes=False)
 @app.route("/ark:/<naan>/<ark_suffix>/manifest", strict_slashes=False)
 def ark_manifest(naan, ark_suffix):
-    """Resolve an ARK manifest qualifier to the Presentation API service.
+    """Resolve an ARK manifest qualifier to Archipelago's Presentation API.
 
-    The manifest service is deliberately a separate deployment.  The ARK
-    remains the stable entry point, while this route hides that implementation
-    detail from citations and from N2T.
+    The ARK remains the stable public entry point, while the stored Archipelago
+    UUID supplies the richer, live IIIF Presentation 3 manifest behind it.
     """
-    canonical_ark, _ = fetch_object_for_ark(naan, ark_suffix)
-    return redirect(f"{MANIFEST_URL_BASE}/{canonical_ark}/manifest", code=302)
+    _, obj = fetch_object_for_ark(naan, ark_suffix)
+    arch_ident = get_identifier_by_shortcode(obj, "arch")
+    if not arch_ident:
+        abort(404)
+
+    arch_url = construct_url(arch_ident.type.url_construct, arch_ident.value)
+    if not arch_url:
+        abort(404)
+    return redirect(
+        f"{arch_url.rstrip('/')}/metadata/iiifmanifest3cws/default.jsonld",
+        code=302,
+    )
 
 
 @app.route("/ark:<naan>/<ark_suffix>/iiif", strict_slashes=False)
