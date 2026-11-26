@@ -952,10 +952,14 @@ def ark_manifest(naan, ark_suffix):
     arch_url = construct_url(arch_ident.type.url_construct, arch_ident.value)
     if not arch_url:
         abort(404)
-    return redirect(
+    response = redirect(
         f"{arch_url.rstrip('/')}/metadata/iiifmanifest3cws/default.jsonld",
         code=302,
     )
+    # Browser-based IIIF viewers must be permitted to follow this cross-origin
+    # redirect before they reach Archipelago's CORS-enabled manifest response.
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 
 @app.route("/ark:<naan>/<ark_suffix>/iiif", strict_slashes=False)
