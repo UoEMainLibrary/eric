@@ -559,6 +559,7 @@ def init_identifier_types():
         ("archives_space", "ArchivesSpace record ID", None),
         ("alma", "Alma record ID", None),
         ("vernon", "Vernon record ID", None),
+        ("dspace_handle", "DSpace Handle", None),
     ]
     for shortcode, desc, url in defaults:
         if not IdentifierType.query.filter_by(shortcode=shortcode).first():

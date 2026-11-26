@@ -64,3 +64,9 @@ Useful commands:
 - `python3 scripts/export_vernon_manifests.py` writes a Vernon XML import file
   containing each Vernon-linked compound object's current ARK and its modern,
   dashless N2T manifest URL. Use `--dry-run` to review the record count first.
+- `python3 scripts/export_dspace_manifest_updates.py --dry-run` previews a
+  BOM-free DSpace metadata CSV, matching `dc.identifier` shelfmarks to ERIC
+  compound objects and emitting public N2T manifest URLs.
+- `python3 scripts/ingest_dspace_handles.py` previews importing canonical
+  `dspace_handle` identifiers from `dc.identifier.uri`; apply migration 007,
+  review the report, then add `--apply` to write them.
